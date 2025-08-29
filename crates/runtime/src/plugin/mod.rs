@@ -6,6 +6,9 @@ pub mod http_server;
 /// The `wasi:config/runtime@0.2.0-draft` runtime configuration plugin
 #[cfg(feature = "runtime-config")]
 pub mod runtime_config;
+/// The `wasi:logging/logging@0.1.0-draft` plugin
+#[cfg(feature = "wasi-logging")]
+pub mod wasi_logging;
 
 #[async_trait::async_trait]
 pub trait Plugin: Send + Sync + 'static {

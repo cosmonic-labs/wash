@@ -87,11 +87,10 @@ pub use workload_handle::WorkloadHandle;
 //     }
 // }
 
+// Tests should only be run with all features enabled, there isn't proper feature gating _yet_
 #[cfg(test)]
 mod test {
-    #[cfg(feature = "http")]
     use crate::plugin::http_server::HttpServer;
-    #[cfg(feature = "runtime-config")]
     use crate::plugin::runtime_config::RuntimeConfig;
     use crate::{
         host::{HostApi, WorkloadStartRequest},

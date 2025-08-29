@@ -264,61 +264,52 @@ impl HostApi for Host {
             (request.workload.clone(), WorkloadState::Starting),
         );
 
-        // TODO: Actually start the workload using the engine
-        // This would involve:
-        // 1. Loading the service component
+        // Start the workload using the engine
+        let (_service, workload_handles) = self
+            .engine
+            .start_workload(request.workload.clone())
+            .context("failed to start workload")?;
 
-        // 2. Loading all components in the wit_world
+        // Bind plugins to all workload handles
         if let Some(wit_world) = wit_world {
-            let c = wit_world
-                .components
-                .get(0)
-                .context("no components in wit_world")?;
+            for (component_idx, workload_handle) in workload_handles.iter().enumerate() {
+                tracing::debug!("Binding plugins for component {}", component_idx);
+                
+                for ww in &wit_world.host_interfaces {
+                    tracing::info!(interface = ?ww, component = component_idx, "Checking interface for plugin binding");
+                    for (id, p) in &self.plugins {
+                        let plugin_interfaces = p.world();
+                        tracing::debug!(plugin_id = id, plugin_interfaces = ?plugin_interfaces, "Checking plugin interfaces");
 
-            // Create a wasmtime component from the first component bytes
-            let component =
-                wasmtime::component::Component::new(self.engine.inner(), c.bytes.clone())
-                    .context("failed to create component from bytes")?;
-
-            // Initialize the workload using the engine to get a WorkloadHandle
-            let workload_handle = self
-                .engine
-                .initialize_workload(component)
-                .context("failed to initialize workload")?;
-
-            // 3. Finding applicable plugins and bind workload handle
-            for ww in &wit_world.host_interfaces {
-                tracing::info!(interface = ?ww, "Checking interface for plugin binding");
-                for (id, p) in &self.plugins {
-                    let plugin_interfaces = p.world();
-                    tracing::info!(plugin_id = id, plugin_interfaces = ?plugin_interfaces, "Checking plugin interfaces");
-
-                    // TODO: Might need to be directional
-                    // Check if plugin supports this interface (ignoring config which is binding-specific)
-                    let interface_match = plugin_interfaces.imports.iter().any(|pi| {
-                        pi.namespace == ww.namespace
-                            && pi.package == ww.package
-                            && pi.interfaces == ww.interfaces
-                            && pi.version == ww.version
-                    }) || plugin_interfaces.exports.iter().any(|pi| {
-                        pi.namespace == ww.namespace
-                            && pi.package == ww.package
-                            && pi.interfaces == ww.interfaces
-                            && pi.version == ww.version
-                    });
-                    if interface_match {
-                        tracing::info!("binding plugin {id} to workload");
-                        if let Err(e) = p
-                            .bind_workload(
-                                &workload_id,
-                                workload_handle.clone(),
-                                HashSet::from([ww.clone()]),
-                            )
-                            .await
-                        {
-                            tracing::error!(plugin_id = id, err = ?e, "failed to bind workload to plugin");
-                        } else {
-                            tracing::info!(plugin_id = id, "Successfully bound workload to plugin");
+                        // TODO: Might need to be directional
+                        // Check if plugin supports this interface (ignoring config which is binding-specific)
+                        let interface_match = plugin_interfaces.imports.iter().any(|pi| {
+                            pi.namespace == ww.namespace
+                                && pi.package == ww.package
+                                && pi.interfaces == ww.interfaces
+                                && pi.version == ww.version
+                        }) || plugin_interfaces.exports.iter().any(|pi| {
+                            pi.namespace == ww.namespace
+                                && pi.package == ww.package
+                                && pi.interfaces == ww.interfaces
+                                && pi.version == ww.version
+                        });
+                        if interface_match {
+                            tracing::info!("binding plugin {} to workload component {}", id, component_idx);
+                            // Create a unique workload ID for each component
+                            let component_workload_id = format!("{}_{}", workload_id, component_idx);
+                            if let Err(e) = p
+                                .bind_workload(
+                                    &component_workload_id,
+                                    workload_handle.clone(),
+                                    HashSet::from([ww.clone()]),
+                                )
+                                .await
+                            {
+                                tracing::error!(plugin_id = id, component = component_idx, err = ?e, "failed to bind workload to plugin");
+                            } else {
+                                tracing::info!(plugin_id = id, component = component_idx, "Successfully bound workload to plugin");
+                            }
                         }
                     }
                 }

@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::Context;
+use tracing::warn;
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime_wasi::{IoView, WasiCtx, WasiCtxBuilder, WasiView};
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpView};
@@ -41,31 +42,28 @@ impl Ctx {
 /// Helper struct to build a [`Ctx`] with a builder pattern
 pub struct CtxBuilder {
     id: String,
-    ctx: WasiCtx,
+    ctx: Option<WasiCtx>,
 }
 
 impl CtxBuilder {
-    pub fn new(id: String, args: Option<&[&str]>) -> Self {
-        let args_vec: Vec<&str> = args
-            .map(|a| a.iter().map(|s| s.as_ref()).collect())
-            .unwrap_or_else(|| vec!["main.wasm"]);
-        Self {
-            id,
-            ctx: WasiCtxBuilder::new()
-                .args(&args_vec)
-                .inherit_stderr()
-                .build(),
-        }
+    pub fn new(id: String) -> Self {
+        Self { id, ctx: None }
     }
 
     pub fn with_wasi_ctx(mut self, ctx: WasiCtx) -> Self {
-        self.ctx = ctx;
+        self.ctx = Some(ctx);
         self
     }
 
     pub fn build(self) -> Ctx {
         Ctx {
-            ctx: self.ctx,
+            id: self.id,
+            ctx: self.ctx.unwrap_or_else(|| {
+                WasiCtxBuilder::new()
+                    .args(&["main.wasm"])
+                    .inherit_stderr()
+                    .build()
+            }),
             http: WasiHttpCtx::new(),
             ..Default::default()
         }
@@ -74,7 +72,7 @@ impl CtxBuilder {
 
 impl Ctx {
     pub fn builder(id: String) -> CtxBuilder {
-        CtxBuilder::new(id, None)
+        CtxBuilder::new(id)
     }
 }
 
@@ -137,35 +135,26 @@ impl Engine {
         &self.inner
     }
 
-    pub fn start_workload(&self, workload: crate::workload::Workload) -> anyhow::Result<()> {
-        // Handle optional service
+    pub fn start_workload(
+        &self,
+        workload: crate::workload::Workload,
+    ) -> anyhow::Result<(Option<crate::workload::Service>, Vec<WorkloadHandle>)> {
+        // Handle optional service - just validate for now, don't create handle yet
         let service = if let Some(svc) = &workload.service {
-            Some(Component::new(&self.inner, svc.bytes.clone())?)
+            warn!(
+                "services not supported yet, validating that it's a proper component but not starting it"
+            );
+            let _component = Component::new(&self.inner, svc.bytes.clone())
+                .context("failed to validate service component")?;
+            Some(svc.clone())
         } else {
             None
         };
-        let _linker: Linker<Ctx> = Linker::new(&self.inner);
-        if let Some(ref s) = service {
-            let _ty = s.component_type();
-            // TODO: Link to components
-        }
 
-        // Handle optional wit_world
-        let _components = if let Some(wit_world) = &workload.wit_world {
-            wit_world
-                .components
-                .iter()
-                .map(|c| Component::new(&self.inner, c.bytes.clone()))
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        // TODO: link components to other components
-
-        let mut service_wasi_ctx = &mut WasiCtxBuilder::new();
+        // Process and validate volumes - create a lookup map from volume name to validated host path
+        let mut validated_volumes = std::collections::HashMap::new();
 
         for v in workload.volumes {
-            // TODO: use for filesystem preopens
             let host_path = match v.volume_type {
                 VolumeType::HostPath(HostPathVolume { local_path }) => {
                     let path = PathBuf::from(&local_path);
@@ -184,50 +173,45 @@ impl Engine {
                     temp_dir.keep()
                 }
             };
-            // Only process volume mounts if service exists
-            if let Some(ref service) = workload.service {
-                for vm in &service.local_resources.volume_mounts {
-                    if vm.name == v.name {
-                        let (dir_perms, file_perms) = if vm.read_only {
-                            (
-                                wasmtime_wasi::DirPerms::READ,
-                                wasmtime_wasi::FilePerms::READ,
-                            )
-                        } else {
-                            (
-                                wasmtime_wasi::DirPerms::MUTATE,
-                                wasmtime_wasi::FilePerms::WRITE,
-                            )
-                        };
-                        service_wasi_ctx = service_wasi_ctx.preopened_dir(
-                            &host_path,
-                            &vm.mount_path,
-                            dir_perms,
-                            file_perms,
-                        )?;
+
+            // Store the validated volume for later lookup
+            validated_volumes.insert(v.name.clone(), host_path);
+        }
+
+        // Initialize all components in wit_world
+        let mut workload_handles = Vec::new();
+        if let Some(wit_world) = &workload.wit_world {
+            for (idx, component) in wit_world.components.iter().enumerate() {
+                match self.initialize_workload(component.clone(), &validated_volumes) {
+                    Ok(handle) => {
+                        tracing::debug!("Successfully initialized component {}", idx);
+                        workload_handles.push(handle);
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to initialize component {}: {}", idx, e);
+                        // Decide if we want to fail fast or continue with other components
+                        // For now, we'll fail fast
+                        return Err(e).context(format!("failed to initialize component {}", idx));
                     }
                 }
             }
         }
 
-        // if let Some(wit_world) = workload.wit_world {
-        //     for c in wit_world.components {
-        //         let component = Component::new(&self.inner, c.bytes)?;
-        //         // let mut linker: Linker<Ctx> = Linker::new(&self.inner);
-        //         // Do this x max_pool
-        //         // let instance_pre = linker
-        //         // .instantiate_pre(&component)
-        //         // .context("failed to pre-instantiate component")?;
-        //     }
-        // }
-
-        Ok(())
+        Ok((service, workload_handles))
     }
 
     pub fn stop_workload() {}
 
     /// Initialize a workload component and return a WorkloadHandle
-    pub fn initialize_workload(&self, component: Component) -> anyhow::Result<WorkloadHandle> {
+    fn initialize_workload(
+        &self,
+        component: crate::workload::Component,
+        validated_volumes: &std::collections::HashMap<String, PathBuf>,
+    ) -> anyhow::Result<WorkloadHandle> {
+        // Create a wasmtime component from the bytes
+        let wasmtime_component = Component::new(&self.inner, component.bytes)
+            .context("failed to create component from bytes")?;
+
         // Create a linker for this component
         let mut linker: Linker<Ctx> = Linker::new(&self.inner);
 
@@ -241,14 +225,26 @@ impl Engine {
 
         // Pre-instantiate the component
         let instance_pre = linker
-            .instantiate_pre(&component)
+            .instantiate_pre(&wasmtime_component)
             .context("failed to pre-instantiate component")?;
 
-        // Create the WorkloadHandle
+        // Build volume mounts for this component by looking up validated volumes
+        let mut component_volume_mounts = Vec::new();
+        for vm in &component.local_resources.volume_mounts {
+            if let Some(host_path) = validated_volumes.get(&vm.name) {
+                component_volume_mounts.push((host_path.clone(), vm.clone()));
+            } else {
+                tracing::warn!("Component references volume '{}' that was not found in workload volumes", vm.name);
+            }
+        }
+
+        // Create the WorkloadHandle with volume mounts
+        // TODO: Pass component configuration (pool_size, max_invocations) to WorkloadHandle
         Ok(WorkloadHandle::new(
-            Arc::new(self.clone()),
+            self.clone(),
             instance_pre,
             linker,
+            component_volume_mounts,
         ))
     }
 

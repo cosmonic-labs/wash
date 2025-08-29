@@ -13,13 +13,7 @@ pub struct WitInterface {
     pub package: String,
     pub interfaces: Vec<String>,
     pub version: Option<semver::Version>,
-    // consideration: Config here is overrides
-    // consideration: Is this a reference or values?
-    // e.g. redis_url: 127.0.0.1:6379
-    // or   profile: work_queue, then the host fetches
     pub config: HashMap<String, String>,
-    // For wasi:http/incoming, Host: <host-to-respond-to>, not name.namespace
-    // Need to load balance internally to hit components, round robin between different components that register the same host
 }
 
 impl std::hash::Hash for WitInterface {
@@ -72,51 +66,3 @@ impl From<&str> for WitInterface {
         }
     }
 }
-
-// impl WitInterface {
-//     fn merge(self, other: Self) -> (Self, Option<Self>) {
-//         if self.namespace == other.namespace
-//             && self.package == other.package
-//             && self.version == other.version
-//         {
-//             // Merge interfaces (deduped)
-//             let mut merged_interfaces = self.interfaces.clone();
-//             for iface in other.interfaces {
-//                 if !merged_interfaces.contains(&iface) {
-//                     merged_interfaces.push(iface);
-//                 }
-//             }
-//             // Always merge both config maps, preferring self's values
-//             let mut merged_config = self.config.clone();
-//             for (k, v) in other.config.iter() {
-//                 merged_config.entry(k.clone()).or_insert_with(|| v.clone());
-//             }
-
-//             let merged = WitInterface {
-//                 namespace: self.namespace,
-//                 package: self.package,
-//                 interfaces: merged_interfaces,
-//                 version: self.version.clone(),
-//                 config: merged_config,
-//             };
-//             (merged, None)
-//         } else {
-//             (
-//                 WitInterface {
-//                     namespace: self.namespace,
-//                     package: self.package,
-//                     interfaces: self.interfaces,
-//                     version: self.version.clone(),
-//                     config: self.config.clone(),
-//                 },
-//                 Some(WitInterface {
-//                     namespace: other.namespace,
-//                     package: other.package,
-//                     interfaces: other.interfaces,
-//                     version: other.version.clone(),
-//                     config: other.config.clone(),
-//                 }),
-//             )
-//         }
-//     }
-// }

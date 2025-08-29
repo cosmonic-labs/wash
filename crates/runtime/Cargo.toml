@@ -4,9 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["http", "runtime-config"]
+default = ["http", "runtime-config", "wasi-logging"]
 http = ["dep:wasmtime-wasi-http"]
 runtime-config = []
+wasi-logging = []
 
 [dependencies]
 anyhow = { workspace = true }
