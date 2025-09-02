@@ -1,6 +1,7 @@
 //! The main module for the wash CLI, providing command line interface functionality
 
 use std::{ops::Deref, path::Path, sync::Arc};
+use uuid;
 
 use anyhow::Context as _;
 use etcetera::{AppStrategy as _, AppStrategyArgs, choose_app_strategy};
@@ -25,7 +26,7 @@ use crate::{
     runtime::{
         Ctx,
         bindings::plugin::{WashPlugin, exports::wasmcloud::wash::plugin::HookType},
-        new_runtime,
+        new_engine,
         plugin::Runner,
     },
 };
@@ -48,7 +49,7 @@ pub trait CliCommand {
     /// Execute the command with the provided context, returning a structured output
     fn handle(&self, ctx: &CliContext) -> impl Future<Output = anyhow::Result<CommandOutput>>;
 
-    /// Enable pre-hook execution for this command
+    /// Enable pre-hook execution for this command  
     fn enable_pre_hook(&self) -> Option<HookType> {
         None
     }
@@ -71,16 +72,14 @@ pub trait CliCommandExt: CliCommand {
                 let hooks = ctx.plugin_manager.get_hooks(hook_type);
                 for hook in hooks {
                     trace!(?hook, ?hook_type, "executing pre-hook for command");
-                    let mut data = Ctx::builder()
-                        .with_background_processes(ctx.background_processes.clone())
-                        .build();
+                    let mut data = Ctx::builder(uuid::Uuid::new_v4().to_string()).build();
                     // TODO(IMPORTANT): context about the command and runner
                     let runner = data
                         .table
                         .push(Runner::new(hook.metadata.clone(), Arc::default()))?;
-                    let mut store = hook.component.new_store(data);
+                    let mut store = hook.workload_handle.new_store();
                     let instance = hook
-                        .component
+                        .workload_handle
                         .instance_pre()
                         .instantiate_async(&mut store)
                         .await
@@ -112,16 +111,14 @@ pub trait CliCommandExt: CliCommand {
                 let hooks = ctx.plugin_manager.get_hooks(hook_type);
                 for hook in hooks {
                     trace!(?hook, "executing post-hook for command");
-                    let mut data = Ctx::builder()
-                        .with_background_processes(ctx.background_processes.clone())
-                        .build();
+                    let mut data = Ctx::builder(uuid::Uuid::new_v4().to_string()).build();
                     // TODO(IMPORTANT): context about the command and runner
                     let runner = data
                         .table
                         .push(Runner::new(hook.metadata.clone(), Arc::default()))?;
-                    let mut store = hook.component.new_store(data);
+                    let mut store = hook.workload_handle.new_store();
                     let instance = hook
-                        .component
+                        .workload_handle
                         .instance_pre()
                         .instantiate_async(&mut store)
                         .await
@@ -267,10 +264,9 @@ pub struct CliContext {
     app_strategy: Xdg,
     #[cfg(windows)]
     app_strategy: Windows,
-    /// The runtime used for executing Wasm components. Plugins and
-    /// dev loops will use this runtime to execute Wasm code.
-    runtime: wasmcloud_runtime::Runtime,
-    runtime_thread: Arc<std::thread::JoinHandle<Result<(), ()>>>,
+    /// The engine used for executing Wasm components. Plugins and
+    /// dev loops will use this engine to execute Wasm code.
+    engine: runtime::Engine,
     plugin_manager: Arc<PluginManager>,
     /// Stores the handles to background processes spawned by host_exec_background. We want to
     /// constrain the processes spawned by components to the lifetime of the CLI context.
@@ -349,18 +345,14 @@ impl CliContext {
                 .context("failed to create config directory")?;
         }
 
-        let (plugin_runtime, thread) = new_runtime()
-            .await
-            .context("failed to create wasmcloud runtime")?;
+        let engine = new_engine().context("failed to create local runtime engine")?;
 
-        let plugin_manager = PluginManager::initialize(&plugin_runtime, app_strategy.data_dir())
-            .await
-            .context("failed to initialize plugin manager")?;
+        // TODO: Update plugin manager when we implement plugin system for local runtime
+        let plugin_manager = PluginManager { plugins: vec![] };
 
         Ok(Self {
             app_strategy,
-            runtime: plugin_runtime,
-            runtime_thread: Arc::new(thread),
+            engine,
             plugin_manager: Arc::new(plugin_manager),
             background_processes: Arc::default(),
         })
@@ -437,16 +429,19 @@ impl CliContext {
         load_config(&self.config_path(), project_dir, None::<Config>)
     }
 
-    pub fn runtime(&self) -> &wasmcloud_runtime::Runtime {
-        &self.runtime
+    pub fn engine(&self) -> &runtime::Engine {
+        &self.engine
     }
-    pub fn runtime_thread(&self) -> &Arc<std::thread::JoinHandle<Result<(), ()>>> {
-        &self.runtime_thread
+
+    pub fn runtime(&self) -> &runtime::Engine {
+        &self.engine
     }
     pub fn plugin_manager(&self) -> &PluginManager {
         &self.plugin_manager
     }
 
+    // TODO: Re-implement hook system for local runtime
+    /*
     /// Call pre-hooks for the specified hook type with the provided runtime context.
     /// This will execute ALL plugins that support the given hook type.
     pub async fn call_pre_hooks(
@@ -548,4 +543,5 @@ impl CliContext {
         }
         Ok(())
     }
+    */
 }

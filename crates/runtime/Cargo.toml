@@ -27,6 +27,9 @@ tracing = { workspace = true }
 wasmtime = { workspace = true, features = ["component-model", "cranelift"] }
 wasmtime-wasi = { workspace = true }
 wasmtime-wasi-http = { workspace = true, optional = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+tokio-rustls = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

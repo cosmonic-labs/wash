@@ -42,7 +42,7 @@ impl DevPluginManager {
     pub fn register_plugin(&mut self, plugin: PluginComponent) -> anyhow::Result<()> {
         // let (component, exported_instances) = compile_plugin_component(runtime, wasm)?;
         let exported_instances =
-            component_instance_exports(plugin.component.instance_pre().component());
+            component_instance_exports(plugin.workload_handle.instance_pre().component());
 
         // The component key is simply a hash of the plugin metadata
         let component_key = format!(
@@ -91,7 +91,7 @@ impl DevPluginManager {
         let key = self.interface_map.get(name)?;
         self.components
             .get(key)
-            .map(|p| p.component.instance_pre().component().clone())
+            .map(|p| p.workload_handle.instance_pre().component().clone())
     }
 
     /// Preinstantiate an instance of a component for a given interface name.

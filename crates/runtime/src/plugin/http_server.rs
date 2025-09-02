@@ -1,8 +1,8 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, path::Path, sync::Arc};
 
 use crate::wit::WitWorld;
 use crate::{Plugin, WorkloadHandle, engine::Ctx};
-use anyhow::{Context, bail};
+use anyhow::{Context, bail, ensure};
 use hyper::server::conn::http1;
 use tokio::net::TcpListener;
 use tracing::{debug, error, info, warn};
@@ -15,13 +15,17 @@ use wasmtime_wasi_http::{
     io::TokioIo,
 };
 
+use rustls::{ServerConfig, pki_types::CertificateDer};
+use rustls_pemfile::{certs, private_key};
 use tokio::sync::{RwLock, mpsc};
+use tokio_rustls::TlsAcceptor;
 
 pub struct HttpServer {
     addr: SocketAddr,
     // Map from host header to workload handles
     workload_handles: Arc<RwLock<HashMap<String, WorkloadHandle>>>,
     shutdown_tx: Arc<RwLock<Option<mpsc::Sender<()>>>>,
+    tls_acceptor: Option<TlsAcceptor>,
 }
 
 impl HttpServer {
@@ -30,7 +34,26 @@ impl HttpServer {
             addr,
             workload_handles: Arc::default(),
             shutdown_tx: Arc::new(RwLock::new(None)),
+            tls_acceptor: None,
         }
+    }
+
+    /// Create a new HTTP server with TLS support
+    pub async fn new_with_tls(
+        addr: SocketAddr,
+        cert_path: &Path,
+        key_path: &Path,
+        ca_path: Option<&Path>,
+    ) -> anyhow::Result<Self> {
+        let tls_config = load_tls_config(cert_path, key_path, ca_path).await?;
+        let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
+
+        Ok(Self {
+            addr,
+            workload_handles: Arc::default(),
+            shutdown_tx: Arc::new(RwLock::new(None)),
+            tls_acceptor: Some(tls_acceptor),
+        })
     }
 }
 
@@ -57,6 +80,7 @@ impl Plugin for HttpServer {
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
         let shutdown_tx_clone = self.shutdown_tx.clone();
         let workload_handles = self.workload_handles.clone();
+        let tls_acceptor = self.tls_acceptor.clone();
 
         // Store the shutdown sender
         *shutdown_tx_clone.write().await = Some(shutdown_tx);
@@ -64,12 +88,19 @@ impl Plugin for HttpServer {
         // Start the HTTP server, any incoming requests call Host::handle and then it's routed
         // to the workload based on host header.
         tokio::spawn(async move {
-            if let Err(e) = run_http_server(addr, workload_handles, &mut shutdown_rx).await {
+            if let Err(e) =
+                run_http_server(addr, workload_handles, &mut shutdown_rx, tls_acceptor).await
+            {
                 error!(err = ?e, addr = ?addr, "HTTP server error");
             }
         });
 
-        info!(addr = ?addr, "HTTP server starting");
+        let protocol = if self.tls_acceptor.is_some() {
+            "HTTPS"
+        } else {
+            "HTTP"
+        };
+        debug!(addr = ?addr, protocol = protocol, "HTTP server starting");
         Ok(())
     }
 
@@ -102,11 +133,12 @@ impl Plugin for HttpServer {
             );
         }
 
-        let Some(host_header) = http_iface.config.get("host") else {
-            bail!("no host header found, unable to bind to workload");
-        };
+        // Use wildcard "*" as default if no host header is specified
+        let host_header = http_iface.config.get("host")
+            .cloned()
+            .unwrap_or_else(|| "*".to_string());
 
-        info!(host = %host_header, workload_id = id, "binding host header to workload");
+        debug!(host = %host_header, workload_id = id, "binding host header to workload");
 
         // NOTE: There is no `add_to_linker` call here because it's already added when initializing
         // the Ctx, as long as the `http` feature is enabled. This is totally possible to do here, but it would
@@ -137,9 +169,10 @@ async fn run_http_server(
     addr: SocketAddr,
     workload_handles: Arc<RwLock<HashMap<String, WorkloadHandle>>>,
     shutdown_rx: &mut mpsc::Receiver<()>,
+    tls_acceptor: Option<TlsAcceptor>,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
-    info!(addr = ?addr, "HTTP server listening");
+    debug!(addr = ?addr, "HTTP server listening");
 
     loop {
         tokio::select! {
@@ -155,20 +188,38 @@ async fn run_http_server(
                         debug!(addr = ?client_addr, "new HTTP client connection");
 
                         let handles_clone = workload_handles.clone();
+                        let tls_acceptor_clone = tls_acceptor.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = http1::Builder::new()
-                                .keep_alive(true)
-                                .serve_connection(
-                                    TokioIo::new(client),
-                                    hyper::service::service_fn(move |req| {
-                                        let handles = handles_clone.clone();
-                                        async move {
-                                            handle_http_request(req, handles).await
-                                        }
-                                    }),
-                                )
-                                .await
-                            {
+                            let service = hyper::service::service_fn(move |req| {
+                                let handles = handles_clone.clone();
+                                async move {
+                                    handle_http_request(req, handles).await
+                                }
+                            });
+
+                            let result = if let Some(acceptor) = tls_acceptor_clone {
+                                // Handle HTTPS connection
+                                match acceptor.accept(client).await {
+                                    Ok(tls_stream) => {
+                                        http1::Builder::new()
+                                            .keep_alive(true)
+                                            .serve_connection(TokioIo::new(tls_stream), service)
+                                            .await
+                                    }
+                                    Err(e) => {
+                                        error!(addr = ?client_addr, err = ?e, "TLS handshake failed");
+                                        return;
+                                    }
+                                }
+                            } else {
+                                // Handle HTTP connection
+                                http1::Builder::new()
+                                    .keep_alive(true)
+                                    .serve_connection(TokioIo::new(client), service)
+                                    .await
+                            };
+
+                            if let Err(e) = result {
                                 error!(addr = ?client_addr, err = ?e, "error serving HTTP client");
                             }
                         });
@@ -200,18 +251,26 @@ async fn handle_http_request(
         .unwrap_or("<no host header>")
         .to_string(); // Convert to String to avoid borrow issues
 
-    info!(
+    debug!(
         method = %method,
         uri = %uri,
         host = %host_header,
         "HTTP request received"
     );
 
-    // Look up workload handle for this host
+    // Look up workload handle for this host, with wildcard fallback
     let workload_handle = {
         let handles = workload_handles.read().await;
         debug!(host = %host_header, "looking up workload handle for host header");
-        handles.get(&host_header).cloned()
+        
+        // First try exact host match
+        if let Some(handle) = handles.get(&host_header) {
+            Some(handle.clone())
+        } else {
+            // Fall back to wildcard if no exact match
+            debug!("No exact match for host header, trying wildcard '*'");
+            handles.get("*").cloned()
+        }
     };
 
     let response = match workload_handle {
@@ -227,7 +286,7 @@ async fn handle_http_request(
             }
         },
         None => {
-            warn!(host = %host_header, "No workload bound to host header");
+            warn!(host = %host_header, "No workload bound to host header or wildcard '*'");
             hyper::Response::builder()
                 .status(404)
                 .body(HyperOutgoingBody::default())
@@ -287,4 +346,65 @@ pub async fn handle_component_request<'a>(
             ))
         }
     }
+}
+
+/// Load TLS configuration from certificate and key files
+/// Extracted from wash dev command for reuse in HTTP server plugin
+async fn load_tls_config(
+    cert_path: &Path,
+    key_path: &Path,
+    ca_path: Option<&Path>,
+) -> anyhow::Result<ServerConfig> {
+    // Load certificate chain
+    let cert_data = tokio::fs::read(cert_path)
+        .await
+        .with_context(|| format!("Failed to read certificate file: {}", cert_path.display()))?;
+    let mut cert_reader = std::io::Cursor::new(cert_data);
+    let cert_chain: Vec<CertificateDer<'static>> = certs(&mut cert_reader)
+        .collect::<Result<Vec<_>, _>>()
+        .with_context(|| format!("Failed to parse certificate file: {}", cert_path.display()))?;
+
+    ensure!(
+        !cert_chain.is_empty(),
+        "No certificates found in file: {}",
+        cert_path.display()
+    );
+
+    // Load private key
+    let key_data = tokio::fs::read(key_path)
+        .await
+        .with_context(|| format!("Failed to read private key file: {}", key_path.display()))?;
+    let mut key_reader = std::io::Cursor::new(key_data);
+    let key = private_key(&mut key_reader)
+        .with_context(|| format!("Failed to parse private key file: {}", key_path.display()))?
+        .ok_or_else(|| anyhow::anyhow!("No private key found in file: {}", key_path.display()))?;
+
+    // Create rustls server config
+    let config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(cert_chain, key)
+        .with_context(|| "Failed to create TLS configuration")?;
+
+    // If CA is provided, configure client certificate verification
+    if let Some(ca_path) = ca_path {
+        let ca_data = tokio::fs::read(ca_path)
+            .await
+            .with_context(|| format!("Failed to read CA file: {}", ca_path.display()))?;
+        let mut ca_reader = std::io::Cursor::new(ca_data);
+        let ca_certs: Vec<CertificateDer<'static>> = certs(&mut ca_reader)
+            .collect::<Result<Vec<_>, _>>()
+            .with_context(|| format!("Failed to parse CA file: {}", ca_path.display()))?;
+
+        ensure!(
+            !ca_certs.is_empty(),
+            "No CA certificates found in file: {}",
+            ca_path.display()
+        );
+
+        // Note: Client certificate verification configuration would go here
+        // For now, we'll keep it simple without client cert verification
+        debug!("CA certificate loaded, but client certificate verification not yet implemented");
+    }
+
+    Ok(config)
 }

@@ -8,32 +8,16 @@ use std::{
 };
 
 use anyhow::{Context as _, ensure};
-use base64::Engine;
 use clap::Args;
-use etcetera::AppStrategy as _;
-use hyper::server::conn::http1;
+use etcetera::AppStrategy;
+// use indicatif::{ProgressBar, ProgressStyle};
 use notify::{
     Event as NotifyEvent, RecursiveMode, Watcher,
     event::{EventKind, ModifyKind},
 };
-use rustls::{ServerConfig, pki_types::CertificateDer};
-use rustls_pemfile::{certs, private_key};
-use tokio::{
-    net::TcpListener,
-    select,
-    sync::{RwLock, mpsc},
-};
-use tokio_rustls::TlsAcceptor;
+use tokio::{select, sync::mpsc};
 use tracing::{debug, error, info, trace, warn};
-use wasmcloud_runtime::component::CustomCtxComponent;
-use wasmtime::{AsContextMut, StoreContextMut, component::InstancePre};
-use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
-use wasmtime_wasi_http::{
-    WasiHttpView as _,
-    bindings::{ProxyPre, http::types::Scheme},
-    body::HyperOutgoingBody,
-    io::TokioIo,
-};
+use runtime::{HostBuilder, Plugin, WitInterface, plugin::http_server::HttpServer};
 
 use crate::{
     cli::{
@@ -44,11 +28,17 @@ use crate::{
     component_build::BuildConfig,
     config::{Config, load_config},
     dev::DevPluginManager,
-    plugin::list_plugins,
-    runtime::{
-        Ctx, bindings::plugin::exports::wasmcloud::wash::plugin::HookType, prepare_component_dev,
-    },
+    // plugin::list_plugins,
+    runtime::{prepare_component_dev, new_engine},
 };
+
+// TODO: Remove when bindings module is implemented for local runtime
+#[allow(dead_code)]
+pub enum HookType {
+    BeforeDev,
+    AfterDev,
+    DevRegister,
+}
 
 /// Helper function to check if a path should be ignored during file watching
 /// to prevent artifact directories from triggering rebuilds
@@ -168,18 +158,6 @@ pub struct DevCommand {
     /// The root directory for the blobstore to use for `wasi:blobstore/blobstore`. Defaults to a subfolder in the wash data directory.
     #[clap(long = "blobstore-root")]
     pub blobstore_root: Option<PathBuf>,
-
-    /// Path to TLS certificate file (PEM format) for HTTPS support
-    #[clap(long = "tls-cert", requires = "tls_key")]
-    pub tls_cert: Option<PathBuf>,
-
-    /// Path to TLS private key file (PEM format) for HTTPS support
-    #[clap(long = "tls-key", requires = "tls_cert")]
-    pub tls_key: Option<PathBuf>,
-
-    /// Path to CA certificate bundle (PEM format) for client certificate verification (optional)
-    #[clap(long = "tls-ca")]
-    pub tls_ca: Option<PathBuf>,
 }
 
 impl CliCommand for DevCommand {
@@ -269,35 +247,38 @@ impl CliCommand for DevCommand {
             .await
             .context("failed to read artifact file")?;
 
+        // TODO: Re-enable when plugin system is adapted to local runtime
         // Call pre-hooks before starting dev session
-        let pre_context = HashMap::new(); // Empty context for pre-hooks
-        let pre_runtime_context = Arc::new(RwLock::new(pre_context));
-        match ctx
-            .call_pre_hooks(pre_runtime_context, HookType::BeforeDev)
-            .await
-        {
-            Ok(_) => {}
-            Err(e) => {
-                error!("pre-hook execution failed, will not start dev session");
-                error!("{e}");
-                return Err(e);
-            }
-        }
+        // let pre_context = HashMap::new(); // Empty context for pre-hooks
+        // let pre_runtime_context = Arc::new(RwLock::new(pre_context));
+        // match ctx
+        //     .call_pre_hooks(pre_runtime_context, HookType::BeforeDev)
+        //     .await
+        // {
+        //     Ok(_) => {}
+        //     Err(e) => {
+        //         error!("pre-hook execution failed, will not start dev session");
+        //         error!("{e}");
+        //         return Err(e);
+        //     }
+        // }
 
         let mut plugin_manager = DevPluginManager::default();
-        let plugins = match list_plugins(ctx.runtime(), ctx.data_dir()).await {
-            Ok(plugins) => plugins
-                .into_iter()
-                .filter(|plugin| {
-                    // Only register plugins that have the dev-hook
-                    plugin.metadata.hooks.contains(&HookType::DevRegister)
-                })
-                .collect(),
-            Err(e) => {
-                warn!(err = ?e, "failed to find plugins, continuing without plugins");
-                vec![]
-            }
-        };
+        // TODO: Re-enable when plugin system is adapted to local runtime
+        let plugins: Vec<crate::plugin::PluginComponent> = vec![];
+        // let plugins = match list_plugins(ctx.runtime(), ctx.data_dir()).await {
+        //     Ok(plugins) => plugins
+        //         .into_iter()
+        //         .filter(|plugin| {
+        //             // Only register plugins that have the dev-hook
+        //             plugin.metadata.hooks.contains(&HookType::DevRegister)
+        //         })
+        //         .collect(),
+        //     Err(e) => {
+        //         warn!(err = ?e, "failed to find plugins, continuing without plugins");
+        //         vec![]
+        //     }
+        // };
 
         for plugin in plugins {
             let name = plugin.metadata.name.clone();
@@ -316,17 +297,62 @@ impl CliCommand for DevCommand {
 
         let plugin_manager = Arc::new(plugin_manager);
 
-        // Prepare the component for development
-        let (component_tx, mut component_rx) =
-            tokio::sync::watch::channel::<Arc<CustomCtxComponent<Ctx>>>(Arc::new(
-                prepare_component_dev(&ctx.runtime, &wasm_bytes, plugin_manager.clone())
-                    .await
-                    .context("failed to prepare component for development")?,
-            ));
+        debug!("Loaded component bytes: {} bytes", wasm_bytes.len());
 
-        // Run the HTTP server in a background task
-        let address = self.address.clone();
-        let runtime_config = self
+        // Create the engine for the host
+        let engine = new_engine().context("failed to create engine")?;
+
+        // Prepare the component for development 
+        let workload_handle = prepare_component_dev(&engine, &wasm_bytes, plugin_manager.clone())
+            .await
+            .context("failed to prepare component for development")?;
+        
+        let (component_tx, _component_rx) =
+            tokio::sync::watch::channel::<runtime::WorkloadHandle>(workload_handle);
+
+        // Parse the address to create socket address
+        let socket_addr: std::net::SocketAddr = self.address.parse()
+            .context("failed to parse HTTP server address")?;
+
+        // Create HTTP server plugin
+        let http_server = Arc::new(HttpServer::new(socket_addr));
+
+        // Build the host with HTTP server plugin
+        let host = HostBuilder::new()
+            .with_engine(engine)
+            .with_plugin("http".to_string(), http_server.clone())
+            .build()
+            .context("failed to build host")?;
+
+        // Start the host (this starts all plugins including HTTP server)
+        host.start().await.context("failed to start host")?;
+        
+        // Bind the workload to the HTTP server with wildcard host header
+        // Create a WitInterface for wasi:http/incoming-handler without specific host config
+        // This will default to wildcard "*" binding
+        let mut http_interfaces = std::collections::HashSet::new();
+        http_interfaces.insert(runtime::WitInterface {
+            namespace: "wasi".to_string(),
+            package: "http".to_string(),
+            interfaces: vec!["incoming-handler".to_string()],
+            version: Some(semver::Version::parse("0.2.0").unwrap()),
+            config: std::collections::HashMap::new(), // Empty config will default to "*"
+        });
+        
+        // Clone the workload handle from the channel
+        let current_handle = component_tx.borrow().clone();
+        
+        http_server.bind_workload(
+            &"dev".to_string(),
+            current_handle,
+            http_interfaces.clone(),
+        )
+        .await
+        .context("failed to bind workload to HTTP server")?;
+        
+        debug!("Workload bound to HTTP server with wildcard host header");
+
+        let _runtime_config = self
             .runtime_config
             .clone()
             .into_iter()
@@ -342,7 +368,7 @@ impl CliCommand for DevCommand {
         let blobstore_root = self
             .blobstore_root
             .clone()
-            .unwrap_or_else(|| ctx.data_dir().join("dev_blobstore"));
+            .unwrap_or_else(|| ctx.in_data_dir("dev_blobstore"));
         // Ensure the blobstore root directory exists
         if !blobstore_root.exists() {
             tokio::fs::create_dir_all(&blobstore_root)
@@ -351,69 +377,7 @@ impl CliCommand for DevCommand {
         }
         debug!(path = ?blobstore_root.display(), "using blobstore root directory");
 
-        // Load TLS configuration if cert and key are provided
-        let tls_acceptor =
-            if let (Some(cert_path), Some(key_path)) = (&self.tls_cert, &self.tls_key) {
-                ensure!(
-                    cert_path.exists(),
-                    "TLS certificate file does not exist: {}",
-                    cert_path.display()
-                );
-                ensure!(
-                    key_path.exists(),
-                    "TLS private key file does not exist: {}",
-                    key_path.display()
-                );
-
-                if let Some(ca_path) = &self.tls_ca {
-                    ensure!(
-                        ca_path.exists(),
-                        "CA certificate file does not exist: {}",
-                        ca_path.display()
-                    );
-                }
-
-                let tls_config = load_tls_config(cert_path, key_path, self.tls_ca.as_deref())
-                    .await
-                    .context("Failed to load TLS configuration")?;
-
-                debug!("TLS configured - server will use HTTPS");
-                Some(TlsAcceptor::from(Arc::new(tls_config)))
-            } else if self.tls_cert.is_some() || self.tls_key.is_some() {
-                // If only one of cert/key is provided, that's an error
-                ensure!(
-                    false,
-                    "Both --tls-cert and --tls-key must be provided for HTTPS support"
-                );
-                None
-            } else {
-                debug!("No TLS configuration provided - server will use HTTP");
-                None
-            };
-
-        // Determine protocol before moving tls_acceptor
-        let protocol = if tls_acceptor.is_some() {
-            "https"
-        } else {
-            "http"
-        };
-
-        // TODO(#19): Only spawn the server if the component exports wasi:http
-        let background_processes = ctx.background_processes.clone();
-        tokio::spawn(async move {
-            if let Err(e) = server(
-                &mut component_rx,
-                address,
-                runtime_config,
-                blobstore_root,
-                background_processes,
-                tls_acceptor,
-            )
-            .await
-            {
-                error!(err = ?e,"error running http server for dev");
-            }
-        });
+        let protocol = "http"; // Default to http for now
 
         // Canonicalize project root once to ensure consistent path comparisons
         let canonical_project_root = self.project_dir.canonicalize().with_context(|| {
@@ -505,8 +469,11 @@ impl CliCommand for DevCommand {
         // Make sure the reload channel is empty before starting the loop
         let _ = reload_rx.try_recv();
 
-        info!("development session started successfully");
         info!(address = %format!("{}://{}", protocol, self.address), "listening for HTTP requests");
+
+        // Clone for use in the reload loop
+        let http_server_reload = http_server.clone();
+        let http_interfaces_reload = http_interfaces.clone();
 
         loop {
             info!("watching for file changes (press Ctrl+c to stop)...");
@@ -536,10 +503,26 @@ impl CliCommand for DevCommand {
                             let wasm_bytes = tokio::fs::read(&artifact_path)
                                 .await
                                 .context("failed to read artifact file")?;
-                            let component = prepare_component_dev(&ctx.runtime, &wasm_bytes, plugin_manager.clone().clear_instances())
+
+                            info!("Component rebuilt: {} bytes", wasm_bytes.len());
+                            
+                            // Prepare the rebuilt component
+                            let rebuild_engine = new_engine().context("failed to create engine for rebuild")?;
+                            let new_workload_handle = prepare_component_dev(&rebuild_engine, &wasm_bytes, plugin_manager.clone().clear_instances())
                                 .await
                                 .context("failed to prepare component")?;
-                            component_tx.send_replace(Arc::new(component));
+                            
+                            // Rebind the new workload to the HTTP server
+                            http_server_reload.bind_workload(
+                                &"dev".to_string(),
+                                new_workload_handle.clone(),
+                                http_interfaces_reload.clone(),
+                            )
+                            .await
+                            .context("failed to rebind workload to HTTP server")?;
+                            
+                            component_tx.send_replace(new_workload_handle);
+                            debug!("Workload rebound to HTTP server");
 
                             // Avoid jitter with reloads by pausing the watcher for a short time
                             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -570,17 +553,18 @@ impl CliCommand for DevCommand {
             }
         }
 
+        // TODO: Re-enable when plugin system is adapted to local runtime
         // Call post-hooks with component bytes context
         // Base64 encode the bytes since context only supports HashMap<String, String>
-        let component_bytes_b64 = base64::engine::general_purpose::STANDARD.encode(&wasm_bytes);
-        let mut post_context = HashMap::new();
-        post_context.insert(
-            "dev.component_bytes_base64".to_string(),
-            component_bytes_b64,
-        );
-        let post_runtime_context = Arc::new(RwLock::new(post_context));
-        ctx.call_post_hooks(post_runtime_context, HookType::AfterDev)
-            .await?;
+        // let component_bytes_b64 = base64::engine::general_purpose::STANDARD.encode(&wasm_bytes);
+        // let mut post_context = HashMap::new();
+        // post_context.insert(
+        //     "dev.component_bytes_base64".to_string(),
+        //     component_bytes_b64,
+        // );
+        // let post_runtime_context = Arc::new(RwLock::new(post_context));
+        // ctx.call_post_hooks(post_runtime_context, HookType::AfterDev)
+        //     .await?;
 
         Ok(CommandOutput::ok(
             "Development command executed successfully".to_string(),
@@ -589,240 +573,8 @@ impl CliCommand for DevCommand {
     }
 }
 
-/// Load TLS configuration from certificate and key files
-async fn load_tls_config(
-    cert_path: &Path,
-    key_path: &Path,
-    ca_path: Option<&Path>,
-) -> anyhow::Result<ServerConfig> {
-    // Load certificate chain
-    let cert_data = tokio::fs::read(cert_path)
-        .await
-        .with_context(|| format!("Failed to read certificate file: {}", cert_path.display()))?;
-    let mut cert_reader = std::io::Cursor::new(cert_data);
-    let cert_chain: Vec<CertificateDer<'static>> = certs(&mut cert_reader)
-        .collect::<Result<Vec<_>, _>>()
-        .with_context(|| format!("Failed to parse certificate file: {}", cert_path.display()))?;
-
-    ensure!(
-        !cert_chain.is_empty(),
-        "No certificates found in file: {}",
-        cert_path.display()
-    );
-
-    // Load private key
-    let key_data = tokio::fs::read(key_path)
-        .await
-        .with_context(|| format!("Failed to read private key file: {}", key_path.display()))?;
-    let mut key_reader = std::io::Cursor::new(key_data);
-    let key = private_key(&mut key_reader)
-        .with_context(|| format!("Failed to parse private key file: {}", key_path.display()))?
-        .ok_or_else(|| anyhow::anyhow!("No private key found in file: {}", key_path.display()))?;
-
-    // Create rustls server config
-    let config = ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(cert_chain, key)
-        .with_context(|| "Failed to create TLS configuration")?;
-
-    // If CA is provided, configure client certificate verification
-    if let Some(ca_path) = ca_path {
-        let ca_data = tokio::fs::read(ca_path)
-            .await
-            .with_context(|| format!("Failed to read CA file: {}", ca_path.display()))?;
-        let mut ca_reader = std::io::Cursor::new(ca_data);
-        let ca_certs: Vec<CertificateDer<'static>> = certs(&mut ca_reader)
-            .collect::<Result<Vec<_>, _>>()
-            .with_context(|| format!("Failed to parse CA file: {}", ca_path.display()))?;
-
-        ensure!(
-            !ca_certs.is_empty(),
-            "No CA certificates found in file: {}",
-            ca_path.display()
-        );
-
-        // Note: Client certificate verification configuration would go here
-        // For now, we'll keep it simple without client cert verification
-        debug!("CA certificate loaded, but client certificate verification not yet implemented");
-    }
-
-    Ok(config)
-}
-
-/// Starts the development HTTP server, listening for incoming requests
-/// and serving them using the provided [`CustomCtxComponent`]. The component
-/// is provided via a `tokio::sync::watch::Receiver`, allowing it to be
-/// updated dynamically (e.g. on a rebuild).
-async fn server(
-    rx: &mut tokio::sync::watch::Receiver<Arc<CustomCtxComponent<Ctx>>>,
-    address: String,
-    runtime_config: HashMap<String, String>,
-    blobstore_root: PathBuf,
-    background_processes: Arc<RwLock<Vec<tokio::process::Child>>>,
-    tls_acceptor: Option<TlsAcceptor>,
-) -> anyhow::Result<()> {
-    // Prepare our server state and start listening for connections.
-    let mut component = rx.borrow_and_update().to_owned();
-    let listener = TcpListener::bind(&address).await?;
-    loop {
-        let blobstore_root = blobstore_root.clone();
-        let runtime_config = runtime_config.clone();
-        let background_processes = background_processes.clone();
-        select! {
-            // If the component changed, replace the current one
-            _ = rx.changed() => {
-                // If the channel has changed, we need to update the component
-                component = rx.borrow_and_update().to_owned();
-                debug!("Component updated in main loop");
-            }
-            // Accept a TCP connection and serve all of its requests in a separate
-            // tokio task. Note that for now this only works with HTTP/1.1.
-            Ok((client, addr)) = listener.accept() => {
-                let component = component.clone();
-                let background_processes = background_processes.clone();
-                let tls_acceptor = tls_acceptor.clone();
-                debug!(addr = ?addr, "serving new client");
-
-                tokio::spawn(async move {
-                    let component = component.clone();
-
-                    // Determine the scheme based on whether TLS is configured
-                    let scheme = if tls_acceptor.is_some() {
-                        Scheme::Https
-                    } else {
-                        Scheme::Http
-                    };
-
-                    // Handle TLS if configured
-                    let service = hyper::service::service_fn(move |req| {
-                        let component = component.clone();
-                        let background_processes = background_processes.clone();
-                        let scheme = scheme.clone();
-                        let wasi_ctx = match WasiCtxBuilder::new()
-                            .preopened_dir(&blobstore_root, "/dev", DirPerms::all(), FilePerms::all())
-                        {
-                            Ok(ctx) => ctx.build(),
-                            Err(e) => {
-                                error!(err = ?e, "failed to create WASI context with preopened dir");
-                                WasiCtxBuilder::new().build()
-                            }
-                        };
-                        let ctx = Ctx::builder()
-                            .with_wasi_ctx(wasi_ctx)
-                            .with_runtime_config(runtime_config.clone())
-                            .with_background_processes(background_processes)
-                            .build();
-                        async move { component.handle_request(Some(ctx), req, scheme).await }
-                    });
-
-                    let result = if let Some(acceptor) = tls_acceptor {
-                        // Handle HTTPS connection
-                        match acceptor.accept(client).await {
-                            Ok(tls_stream) => {
-                                http1::Builder::new()
-                                    .keep_alive(true)
-                                    .serve_connection(TokioIo::new(tls_stream), service)
-                                    .await
-                            }
-                            Err(e) => {
-                                error!(addr = ?addr, err = ?e, "TLS handshake failed");
-                                return;
-                            }
-                        }
-                    } else {
-                        // Handle HTTP connection
-                        http1::Builder::new()
-                            .keep_alive(true)
-                            .serve_connection(TokioIo::new(client), service)
-                            .await
-                    };
-
-                    if let Err(e) = result {
-                        error!(addr = ?addr, err = ?e, "error serving client");
-                    }
-                });
-            }
-        }
-    }
-}
-
-/// Simple trait for handling an HTTP request, used primarily to extend the
-/// `CustomCtxComponent` with a method that can handle HTTP requests
-trait HandleRequest {
-    async fn handle_request(
-        &self,
-        ctx: Option<Ctx>,
-        req: hyper::Request<hyper::body::Incoming>,
-        scheme: Scheme,
-    ) -> anyhow::Result<hyper::Response<HyperOutgoingBody>>;
-}
-impl HandleRequest for CustomCtxComponent<Ctx> {
-    async fn handle_request(
-        &self,
-        ctx: Option<Ctx>,
-        req: hyper::Request<hyper::body::Incoming>,
-        scheme: Scheme,
-    ) -> anyhow::Result<hyper::Response<HyperOutgoingBody>> {
-        // Create per-http-request state within a `Store` and prepare the
-        // initial resources passed to the `handle` function.
-        let ctx = ctx.unwrap_or_default();
-        let mut store = self.new_store(ctx);
-        let pre = self.instance_pre().clone();
-        handle_request(store.as_context_mut(), pre, req, scheme).await
-    }
-}
-
-pub async fn handle_request<'a>(
-    mut store: StoreContextMut<'a, Ctx>,
-    pre: InstancePre<Ctx>,
-    req: hyper::Request<hyper::body::Incoming>,
-    scheme: Scheme,
-) -> anyhow::Result<hyper::Response<HyperOutgoingBody>> {
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    let req = store.data_mut().new_incoming_request(scheme, req)?;
-    let out = store.data_mut().new_response_outparam(sender)?;
-    let pre = ProxyPre::new(pre).context("failed to instantiate proxy pre")?;
-
-    // Run the http request itself in a separate task so the task can
-    // optionally continue to execute beyond after the initial
-    // headers/response code are sent.
-    // let task: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
-    let proxy = pre.instantiate_async(&mut store).await?;
-
-    proxy
-        .wasi_http_incoming_handler()
-        .call_handle(&mut store, req, out)
-        .await?;
-
-    // Ok(())
-    // });
-
-    match receiver.await {
-        // If the client calls `response-outparam::set` then one of these
-        // methods will be called.
-        Ok(Ok(resp)) => Ok(resp),
-        Ok(Err(e)) => Err(e.into()),
-
-        // Otherwise the `sender` will get dropped along with the `Store`
-        // meaning that the oneshot will get disconnected and here we can
-        // inspect the `task` result to see what happened
-        Err(e) => {
-            error!(err = ?e, "error receiving http response");
-            Err(anyhow::anyhow!(
-                "oneshot channel closed but no response was sent"
-            ))
-            // Err(match task.await {
-            //     Ok(Ok(())) => {
-            //         anyhow::anyhow!("oneshot channel closed but no response was sent")
-            //     }
-            //     Ok(Err(e)) => e,
-            //     Err(e) => {
-            //         anyhow::anyhow!("failed to await task for handling HTTP request: {e}")
-            //     }
-            // })
-        }
-    }
-}
+// TODO: HTTP server functionality has been moved to the HTTP server plugin
+// located at: crates/runtime/src/plugin/http_server.rs
 
 #[cfg(test)]
 mod tests {
@@ -1050,109 +802,5 @@ mod tests {
         assert!(!is_ignored(&subproject_src, &project_root, &ignore_paths));
     }
 
-    #[cfg(test)]
-    #[tokio::test]
-    async fn test_tls_config_loading() {
-        // Generate self-signed certificate for testing
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
-            .expect("failed to generate self-signed cert");
-
-        // Create temp directory for cert files
-        let temp_dir = TempDir::new().expect("failed to create temp dir");
-        let cert_path = temp_dir.path().join("cert.pem");
-        let key_path = temp_dir.path().join("key.pem");
-
-        // Write certificate and key to files
-        let cert_pem = cert.cert.pem();
-        tokio::fs::write(&cert_path, cert_pem.as_bytes())
-            .await
-            .expect("failed to write cert");
-
-        let key_pem = cert.key_pair.serialize_pem();
-        tokio::fs::write(&key_path, key_pem.as_bytes())
-            .await
-            .expect("failed to write key");
-
-        // Test loading TLS configuration
-        let tls_config = load_tls_config(&cert_path, &key_path, None).await;
-        assert!(
-            tls_config.is_ok(),
-            "Failed to load TLS config: {:?}",
-            tls_config.err()
-        );
-
-        // Verify the TLS config can be used to create an acceptor
-        let config = tls_config.unwrap();
-        let acceptor = TlsAcceptor::from(Arc::new(config));
-
-        // Basic validation that acceptor was created successfully
-        // Since TlsAcceptor doesn't implement Debug, just verify it's created
-        let _ = acceptor;
-    }
-
-    #[cfg(test)]
-    #[tokio::test]
-    async fn test_tls_server_scheme_detection() {
-        // Generate self-signed certificate
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
-            .expect("failed to generate self-signed cert");
-
-        let temp_dir = TempDir::new().expect("failed to create temp dir");
-        let cert_path = temp_dir.path().join("cert.pem");
-        let key_path = temp_dir.path().join("key.pem");
-
-        let cert_pem = cert.cert.pem();
-        tokio::fs::write(&cert_path, cert_pem.as_bytes())
-            .await
-            .expect("failed to write cert");
-
-        let key_pem = cert.key_pair.serialize_pem();
-        tokio::fs::write(&key_path, key_pem.as_bytes())
-            .await
-            .expect("failed to write key");
-
-        // Load TLS configuration
-        let tls_config = load_tls_config(&cert_path, &key_path, None)
-            .await
-            .expect("failed to load TLS config");
-        let tls_acceptor = Some(TlsAcceptor::from(Arc::new(tls_config)));
-
-        // Test that scheme is correctly set to HTTPS when TLS is configured
-        assert!(tls_acceptor.is_some());
-
-        // Verify the scheme would be HTTPS
-        let scheme = if tls_acceptor.is_some() {
-            Scheme::Https
-        } else {
-            Scheme::Http
-        };
-        assert_eq!(format!("{:?}", scheme), "Scheme::Https");
-
-        // Test without TLS
-        let no_tls_acceptor: Option<TlsAcceptor> = None;
-        let scheme = if no_tls_acceptor.is_some() {
-            Scheme::Https
-        } else {
-            Scheme::Http
-        };
-        assert_eq!(format!("{:?}", scheme), "Scheme::Http");
-    }
-
-    #[cfg(test)]
-    #[tokio::test]
-    async fn test_tls_config_validation() {
-        let temp_dir = TempDir::new().expect("failed to create temp dir");
-        let nonexistent_cert = temp_dir.path().join("nonexistent.pem");
-        let nonexistent_key = temp_dir.path().join("nonexistent_key.pem");
-
-        // Test loading with non-existent files should fail
-        let result = load_tls_config(&nonexistent_cert, &nonexistent_key, None).await;
-        assert!(result.is_err(), "Should fail with non-existent files");
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Failed to read certificate file")
-        );
-    }
+    // TODO: TLS functionality tests have been moved to crates/runtime/src/plugin/http_server.rs
 }

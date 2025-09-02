@@ -10,6 +10,10 @@ pub mod runtime_config;
 #[cfg(feature = "wasi-logging")]
 pub mod wasi_logging;
 
+// Could these be plugins?
+// pub mod wasi_keyvalue
+// pub mod wasi_blobstore
+
 #[async_trait::async_trait]
 pub trait Plugin: Send + Sync + 'static {
     /// Returns the WIT interfaces that this plugin exposes. This plugin's [`Plugin::bind_workload`] function

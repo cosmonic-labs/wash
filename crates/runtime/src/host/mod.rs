@@ -274,7 +274,7 @@ impl HostApi for Host {
         if let Some(wit_world) = wit_world {
             for (component_idx, workload_handle) in workload_handles.iter().enumerate() {
                 tracing::debug!("Binding plugins for component {}", component_idx);
-                
+
                 for ww in &wit_world.host_interfaces {
                     tracing::info!(interface = ?ww, component = component_idx, "Checking interface for plugin binding");
                     for (id, p) in &self.plugins {
@@ -295,9 +295,14 @@ impl HostApi for Host {
                                 && pi.version == ww.version
                         });
                         if interface_match {
-                            tracing::info!("binding plugin {} to workload component {}", id, component_idx);
+                            tracing::info!(
+                                "binding plugin {} to workload component {}",
+                                id,
+                                component_idx
+                            );
                             // Create a unique workload ID for each component
-                            let component_workload_id = format!("{}_{}", workload_id, component_idx);
+                            let component_workload_id =
+                                format!("{}_{}", workload_id, component_idx);
                             if let Err(e) = p
                                 .bind_workload(
                                     &component_workload_id,
@@ -308,7 +313,11 @@ impl HostApi for Host {
                             {
                                 tracing::error!(plugin_id = id, component = component_idx, err = ?e, "failed to bind workload to plugin");
                             } else {
-                                tracing::info!(plugin_id = id, component = component_idx, "Successfully bound workload to plugin");
+                                tracing::info!(
+                                    plugin_id = id,
+                                    component = component_idx,
+                                    "Successfully bound workload to plugin"
+                                );
                             }
                         }
                     }

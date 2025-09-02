@@ -13,6 +13,7 @@ repository = "https://github.com/wasmcloud/wash"
 [workspace]
 members = [
     "crates/runtime",
+    "crates/k8s-host",
 ]
 
 [lib]
@@ -39,7 +40,7 @@ dialoguer = { workspace = true, features = ["editor", "password", "zeroize", "fu
 docker_credential = { workspace = true }
 etcetera = { workspace = true }
 figment = { workspace = true, features = ["json", "env"] }
-flate2 = { workspace = true }
+flate2 = { workspace = true, features = ["rust_backend"] }
 git2 = { workspace = true }
 hyper = { workspace = true }
 indicatif = { workspace = true }
@@ -58,9 +59,12 @@ tracing = { workspace = true, features = ["attributes"] }
 tracing-subscriber = { workspace = true, features = ["env-filter", "ansi", "time", "json"] }
 url = { workspace = true }
 uuid = { workspace = true, features = ["std"] }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+tokio-rustls = { workspace = true }
 wasm-pkg-client = { workspace = true }
 wasm-pkg-core = { workspace = true }
-wasmcloud-runtime = { git = "https://github.com/wasmCloud/wasmCloud", version = "0.11.0" }
+runtime = { path = "crates/runtime" }
 wasmtime = { workspace = true }
 wasmtime-wasi = { workspace = true }
 wasmtime-wasi-http = { workspace = true }
@@ -109,7 +113,7 @@ url = { version = "2.5", default-features = false }
 uuid = { version = "1.17.0", default-features = false }
 wasm-pkg-client = { version = "0.10.0", default-features = false }
 wasm-pkg-core = { version = "0.10.0", default-features = false }
-wasmcloud-runtime = { git = "https://github.com/wasmCloud/wasmCloud", version = "0.11.0" }
+runtime = { path = "crates/runtime" }
 wasmtime = { version = "31", default-features = false }
 wasmtime-wasi = { version = "31", default-features = false }
 wasmtime-wasi-http = { version = "31", default-features = false }

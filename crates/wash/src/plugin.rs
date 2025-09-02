@@ -5,6 +5,7 @@
 
 use anyhow::{Context as _, bail};
 use etcetera::AppStrategy;
+use runtime::{Engine, WorkloadHandle};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -12,7 +13,6 @@ use std::{
 };
 use tokio::sync::RwLock;
 use tracing::{debug, info, instrument};
-use wasmcloud_runtime::{Runtime, component::CustomCtxComponent};
 
 use crate::{
     cli::CliContext,
@@ -35,7 +35,7 @@ use crate::{
 /// implements the wash plugin interface. It contains the component itself, its metadata,
 /// and the filesystem root where the plugin can read and write files using wasi:filesystem
 pub struct PluginComponent {
-    pub component: CustomCtxComponent<Ctx>,
+    pub workload_handle: WorkloadHandle,
     pub metadata: Metadata,
     /// A read/write allowed directory for the component to use as its filesystem root
     pub wasi_fs_root: Option<PathBuf>,
@@ -52,13 +52,13 @@ impl std::fmt::Debug for PluginComponent {
 
 impl PluginComponent {
     pub async fn new(
-        component: CustomCtxComponent<Ctx>,
+        workload_handle: WorkloadHandle,
         data_dir: Option<impl AsRef<Path>>,
     ) -> anyhow::Result<Self> {
-        let pre = component.instance_pre();
-        let mut store = component.new_store(Ctx::default());
+        let mut store = workload_handle.new_store();
         // Instantiate component
-        let instance = pre
+        let instance = workload_handle
+            .instance_pre()
             .instantiate_async(&mut store)
             .await
             .context("failed to instantiate plugin")?;
@@ -84,7 +84,7 @@ impl PluginComponent {
         }
 
         Ok(Self {
-            component,
+            workload_handle,
             metadata,
             wasi_fs_root,
         })
@@ -93,12 +93,12 @@ impl PluginComponent {
     /// Call the plugin's `call_info` method to retrieve its metadata. Only use this
     /// method if you need to get metadata without instantiating the component. Otherwise,
     /// [`PluginComponent::metadata`] already contains the metadata.
-    pub async fn call_info(&self, ctx: Ctx) -> anyhow::Result<Metadata> {
+    pub async fn call_info(&self, _ctx: Ctx) -> anyhow::Result<Metadata> {
         // Create a new store with the default context
-        let mut store = self.component.new_store(ctx);
+        let mut store = self.workload_handle.new_store();
         // Instantiate the component and call the plugin host bindings to get metadata
         let instance = self
-            .component
+            .workload_handle
             .instance_pre()
             .instantiate_async(&mut store)
             .await
@@ -113,13 +113,13 @@ impl PluginComponent {
     /// with the provided context
     pub async fn call_hook(
         &self,
-        ctx: Ctx,
+        _ctx: Ctx,
         hook: HookType,
         runner_context: Arc<RwLock<HashMap<String, String>>>,
     ) -> anyhow::Result<String> {
-        let mut store = self.component.new_store(ctx);
+        let mut store = self.workload_handle.new_store();
         let instance = self
-            .component
+            .workload_handle
             .instance_pre()
             .instantiate_async(&mut store)
             .await
@@ -135,7 +135,7 @@ impl PluginComponent {
             .wasmcloud_wash_plugin()
             .call_initialize(&mut store, initialize_runner)
             .await?
-            .map_err(|e| anyhow::anyhow!(e))?;
+            .map_err(|e: String| anyhow::anyhow!(e))?;
 
         let hook_runner = store.data_mut().table.push(runner)?;
         // Call the hook with the provided runner
@@ -143,19 +143,19 @@ impl PluginComponent {
             .wasmcloud_wash_plugin()
             .call_hook(&mut store, hook_runner, hook)
             .await?
-            .map_err(|e| anyhow::anyhow!(e))
+            .map_err(|e: String| anyhow::anyhow!(e))
     }
 
     /// Instantiate a new instance of this component and call the run function
     pub async fn call_run(
         &self,
-        ctx: Ctx,
+        _ctx: Ctx,
         command: &bindings::plugin::wasmcloud::wash::types::Command,
         runner_context: Arc<RwLock<HashMap<String, String>>>,
     ) -> anyhow::Result<String> {
-        let mut store = self.component.new_store(ctx);
+        let mut store = self.workload_handle.new_store();
         let instance = self
-            .component
+            .workload_handle
             .instance_pre()
             .instantiate_async(&mut store)
             .await
@@ -169,7 +169,7 @@ impl PluginComponent {
             .wasmcloud_wash_plugin()
             .call_initialize(&mut store, initialize_runner)
             .await?
-            .map_err(|e| anyhow::anyhow!(e))?;
+            .map_err(|e: String| anyhow::anyhow!(e))?;
 
         let command_runner = store.data_mut().table.push(runner)?;
 
@@ -178,7 +178,7 @@ impl PluginComponent {
             .wasmcloud_wash_plugin()
             .call_run(&mut store, command_runner, command)
             .await?
-            .map_err(|e| anyhow::anyhow!(e))
+            .map_err(|e: String| anyhow::anyhow!(e))
     }
 
     pub fn metadata(&self) -> &Metadata {
@@ -193,8 +193,8 @@ pub struct PluginManager {
 }
 
 impl PluginManager {
-    pub async fn initialize(runtime: &Runtime, data_dir: impl AsRef<Path>) -> anyhow::Result<Self> {
-        let plugins = list_plugins(runtime, data_dir.as_ref())
+    pub async fn initialize(engine: &Engine, data_dir: impl AsRef<Path>) -> anyhow::Result<Self> {
+        let plugins = list_plugins(engine, data_dir.as_ref())
             .await?
             .into_iter()
             .map(Arc::new)
@@ -317,7 +317,7 @@ pub async fn install_plugin(
         };
 
     // Validate that it's a valid WebAssembly component and wash plugin
-    let metadata = get_plugin_metadata(ctx.runtime(), &component_data).await?;
+    let metadata = get_plugin_metadata(ctx.engine(), &component_data).await?;
 
     // Validate that plugin commands don't conflict with built-in commands
     validate_plugin_commands(&metadata)?;
@@ -385,7 +385,7 @@ pub async fn uninstall_plugin(ctx: &CliContext, name: &str) -> anyhow::Result<()
 /// List all installed plugins, returning their bytes and [`Metadata`]
 #[instrument(level = "debug", skip_all, name = "list_plugins")]
 pub async fn list_plugins(
-    runtime: &Runtime,
+    engine: &Engine,
     data_dir: impl AsRef<Path>,
 ) -> anyhow::Result<Vec<PluginComponent>> {
     let plugins_dir = data_dir.as_ref().join(PLUGINS_DIR);
@@ -420,7 +420,7 @@ pub async fn list_plugins(
             .await
             .with_context(|| format!("failed to read plugin file: {}", path.display()))?;
 
-        let component_plugin = prepare_component_plugin(runtime, &plugin, Some(data_dir.as_ref()))
+        let component_plugin = prepare_component_plugin(engine, &plugin, Some(data_dir.as_ref()))
             .await
             .with_context(|| format!("failed to prepare plugin component: {plugin_name}"))?;
 
@@ -435,10 +435,8 @@ pub async fn list_plugins(
 
 /// Get metadata for a plugin from its WebAssembly bytes. This should only be used if you
 /// don't need to use the plugin component again, otherwise prefer to use [`prepare_component_plugin`] directly.
-pub async fn get_plugin_metadata(runtime: &Runtime, wasm: &[u8]) -> anyhow::Result<Metadata> {
-    Ok(prepare_component_plugin(runtime, wasm, None)
-        .await?
-        .metadata)
+pub async fn get_plugin_metadata(engine: &Engine, wasm: &[u8]) -> anyhow::Result<Metadata> {
+    Ok(prepare_component_plugin(engine, wasm, None).await?.metadata)
 }
 
 /// Sanitize a plugin name for filesystem storage
@@ -508,7 +506,7 @@ async fn validate_plugin_conflicts(
     new_metadata: &Metadata,
 ) -> anyhow::Result<()> {
     // Get all existing plugins
-    let existing_plugins = list_plugins(ctx.runtime(), ctx.data_dir()).await?;
+    let existing_plugins = list_plugins(ctx.engine(), ctx.data_dir()).await?;
 
     let new_plugin_name = new_metadata.name.to_lowercase();
 

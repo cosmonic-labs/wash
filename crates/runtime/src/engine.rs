@@ -234,7 +234,10 @@ impl Engine {
             if let Some(host_path) = validated_volumes.get(&vm.name) {
                 component_volume_mounts.push((host_path.clone(), vm.clone()));
             } else {
-                tracing::warn!("Component references volume '{}' that was not found in workload volumes", vm.name);
+                tracing::warn!(
+                    "Component references volume '{}' that was not found in workload volumes",
+                    vm.name
+                );
             }
         }
 
