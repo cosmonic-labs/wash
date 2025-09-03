@@ -6,7 +6,6 @@ use uuid;
 use anyhow::Context as _;
 use etcetera::{AppStrategy as _, AppStrategyArgs, choose_app_strategy};
 use tokio::{process::Child, sync::RwLock};
-use tracing::info;
 
 #[cfg(windows)]
 use etcetera::app_strategy::Windows;

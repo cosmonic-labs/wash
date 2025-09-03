@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use names::{Generator, Name};
+use tokio::sync::RwLock;
 
-use crate::WitInterface;
 use crate::engine::Engine;
 use crate::plugin::Plugin;
 use crate::wit::WitWorld;
@@ -21,7 +21,7 @@ pub trait HostApi {
     /// Request a [`HostHeartbeat`] from the host
     fn heartbeat(&self) -> impl Future<Output = anyhow::Result<HostHeartbeat>>;
     fn workload_start(
-        &mut self,
+        &self,
         request: WorkloadStartRequest,
     ) -> impl Future<Output = anyhow::Result<WorkloadStartResponse>>;
     fn workload_status(
@@ -29,15 +29,40 @@ pub trait HostApi {
         request: WorkloadStatusRequest,
     ) -> impl Future<Output = anyhow::Result<WorkloadStatusResponse>>;
     fn workload_stop(
-        &mut self,
+        &self,
         request: WorkloadStopRequest,
     ) -> impl Future<Output = anyhow::Result<WorkloadStopResponse>>;
+}
+
+// Helper trait impl that helps with Arc-ing the Host
+impl<T: HostApi> HostApi for Arc<T> {
+    async fn heartbeat(&self) -> anyhow::Result<HostHeartbeat> {
+        self.as_ref().heartbeat().await
+    }
+    async fn workload_start(
+        &self,
+        request: WorkloadStartRequest,
+    ) -> anyhow::Result<WorkloadStartResponse> {
+        self.as_ref().workload_start(request).await
+    }
+    async fn workload_stop(
+        &self,
+        request: WorkloadStopRequest,
+    ) -> anyhow::Result<WorkloadStopResponse> {
+        self.as_ref().workload_stop(request).await
+    }
+    async fn workload_status(
+        &self,
+        request: WorkloadStatusRequest,
+    ) -> anyhow::Result<WorkloadStatusResponse> {
+        self.as_ref().workload_status(request).await
+    }
 }
 
 pub struct Host {
     engine: Engine,
     /// Workloads mapped from ID to the workload and its current state
-    workloads: HashMap<String, (Workload, WorkloadState)>,
+    workloads: Arc<RwLock<HashMap<String, (Workload, WorkloadState)>>>,
     /// Plugins in a map from their ID to the plugin itself
     plugins: HashMap<String, Arc<dyn Plugin>>,
     /// Host metadata
@@ -54,7 +79,7 @@ pub struct Host {
 
 impl Host {
     /// Start the host, performing initialization steps like starting plugins
-    pub async fn start(&self) -> anyhow::Result<()> {
+    pub async fn start(self) -> anyhow::Result<Arc<Self>> {
         // Start all plugins, any errors means the host fails to start.
         for (id, plugin) in &self.plugins {
             if let Err(e) = plugin.start().await {
@@ -63,10 +88,10 @@ impl Host {
             }
         }
 
-        Ok(())
+        Ok(Arc::new(self))
     }
 
-    pub async fn stop(self) -> anyhow::Result<()> {
+    pub async fn stop(self: Arc<Self>) -> anyhow::Result<()> {
         // Stop all plugins, log errors but continue stopping others
         for (id, plugin) in &self.plugins {
             let stop_fut = plugin.stop();
@@ -82,6 +107,18 @@ impl Host {
         }
 
         Ok(())
+    }
+
+    pub fn label(&self, label: impl AsRef<str>) -> Option<&String> {
+        self.labels.get(label.as_ref())
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn friendly_name(&self) -> &str {
+        &self.friendly_name
     }
 
     /// Helper function to generate a unique ID for a workload
@@ -118,7 +155,7 @@ impl Host {
     /// This can be viewed as an inversion of the worlds that this host can support. In the above example,
     /// this host can support any component that imports `bar` and exports `foo`. Other exports will be ignored,
     /// and other imports that are unsatisfied will be rejected.
-    fn wit_world(&self) -> WitWorld {
+    pub fn wit_world(&self) -> WitWorld {
         let mut imports = HashSet::new();
         // The host provides wasi@0.2 interfaces other than wasi:http
         // <https://docs.rs/wasmtime-wasi/36.0.2/wasmtime_wasi/p2/index.html#wasip2-interfaces>
@@ -149,30 +186,24 @@ impl Host {
     }
 
     /// Returns a three-tuple of (OS architecture, OS name, OS kernel)
-    fn get_system_info() -> (String, String, String) {
+    async fn get_system_info(&self) -> (String, String, String) {
         // Get OS information
         let os_name = std::env::consts::OS.to_string();
         let os_arch = std::env::consts::ARCH.to_string();
-        let os_kernel = format!("{} {}", std::env::consts::OS, std::env::consts::FAMILY);
+        let os_kernel = std::env::consts::FAMILY.to_string();
         (os_arch, os_name, os_kernel)
     }
 
     /// Returns a tuple of (total memory, free memory)
-    fn get_memory_info(&self) -> anyhow::Result<(u64, u64)> {
-        let monitor = self
-            .system_monitor
-            .read()
-            .map_err(|e| anyhow::anyhow!("failed to acquire read lock on system monitor: {}", e))?;
+    async fn get_memory_info(&self) -> anyhow::Result<(u64, u64)> {
+        let monitor = self.system_monitor.read().await;
         let mem = monitor.memory_usage();
         Ok((mem.total_memory, mem.free_memory))
     }
 
     /// Returns the current global CPU usage as a percentage
-    fn get_cpu_usage(&self) -> anyhow::Result<f32> {
-        let monitor = self
-            .system_monitor
-            .read()
-            .map_err(|e| anyhow::anyhow!("failed to acquire read lock on system monitor: {}", e))?;
+    async fn get_cpu_usage(&self) -> anyhow::Result<f32> {
+        let monitor = self.system_monitor.read().await;
         Ok(monitor.cpu_usage().global_usage)
     }
 }
@@ -181,29 +212,29 @@ impl HostApi for Host {
     async fn heartbeat(&self) -> anyhow::Result<HostHeartbeat> {
         // Refresh system info before reporting
         {
-            let mut monitor = self.system_monitor.write().map_err(|e| {
-                anyhow::anyhow!("failed to acquire write lock on system monitor: {}", e)
-            })?;
+            let mut monitor = self.system_monitor.write().await;
             monitor.refresh();
             monitor.report_usage();
         }
 
-        let (os_arch, os_name, os_kernel) = Self::get_system_info();
+        let (os_arch, os_name, os_kernel) = self.get_system_info().await;
         let (system_memory_total, system_memory_free) = self
             .get_memory_info()
+            .await
             .context("failed to get memory info")?;
-        let system_cpu_usage = self.get_cpu_usage().context("failed to get CPU usage")?;
+        let system_cpu_usage = self
+            .get_cpu_usage()
+            .await
+            .context("failed to get CPU usage")?;
 
         // Count components and providers from workloads
         let component_count: u64 = self
             .workloads
+            .read()
+            .await
             .values()
             // TODO: Include services?
-            .map(|(w, _)| {
-                w.wit_world
-                    .as_ref()
-                    .map_or(0, |world| world.components.len() as u64)
-            })
+            .map(|(w, _)| w.components.len() as u64)
             .sum();
 
         // TODO: Properly track providers once we have provider support
@@ -213,12 +244,10 @@ impl HostApi for Host {
         let mut imports = Vec::new();
         let exports = Vec::new();
 
-        for (workload, state) in self.workloads.values() {
+        for (workload, state) in self.workloads.read().await.values() {
             if *state == WorkloadState::Running {
-                // Add host interfaces as imports if wit_world exists
-                if let Some(wit_world) = &workload.wit_world {
-                    imports.extend(wit_world.host_interfaces.clone());
-                }
+                // Add host interfaces as imports
+                imports.extend(workload.host_interfaces.clone());
                 // TODO: Add component exports when we track them
             }
         }
@@ -244,7 +273,7 @@ impl HostApi for Host {
     }
 
     async fn workload_start(
-        &mut self,
+        &self,
         request: WorkloadStartRequest,
     ) -> anyhow::Result<WorkloadStartResponse> {
         let Workload {
@@ -252,73 +281,68 @@ impl HostApi for Host {
             name: _,
             annotations: _,
             service: _,
-            wit_world,
+            components: _,
+            host_interfaces,
             volumes: _,
         } = &request.workload;
 
         let workload_id = self.generate_workload_id();
 
         // Store the workload with initial state
-        self.workloads.insert(
+        self.workloads.write().await.insert(
             workload_id.clone(),
             (request.workload.clone(), WorkloadState::Starting),
         );
 
         // Start the workload using the engine
-        let (_service, workload_handles) = self
-            .engine
-            .start_workload(request.workload.clone())
-            .context("failed to start workload")?;
+        let (_service, workload_handles) = self.engine.start_workload(request.workload.clone())?;
 
         // Bind plugins to all workload handles
-        if let Some(wit_world) = wit_world {
-            for (component_idx, workload_handle) in workload_handles.iter().enumerate() {
-                tracing::debug!("Binding plugins for component {}", component_idx);
+        for (component_idx, workload_handle) in workload_handles.iter().enumerate() {
+            tracing::debug!("Binding plugins for component {}", component_idx);
 
-                for ww in &wit_world.host_interfaces {
-                    tracing::info!(interface = ?ww, component = component_idx, "Checking interface for plugin binding");
-                    for (id, p) in &self.plugins {
-                        let plugin_interfaces = p.world();
-                        tracing::debug!(plugin_id = id, plugin_interfaces = ?plugin_interfaces, "Checking plugin interfaces");
+            for ww in host_interfaces {
+                tracing::info!(interface = ?ww, component = component_idx, "Checking interface for plugin binding");
+                for (id, p) in &self.plugins {
+                    let plugin_interfaces = p.world();
+                    tracing::debug!(plugin_id = id, plugin_interfaces = ?plugin_interfaces, "Checking plugin interfaces");
 
-                        // TODO: Might need to be directional
-                        // Check if plugin supports this interface (ignoring config which is binding-specific)
-                        let interface_match = plugin_interfaces.imports.iter().any(|pi| {
-                            pi.namespace == ww.namespace
-                                && pi.package == ww.package
-                                && pi.interfaces == ww.interfaces
-                                && pi.version == ww.version
-                        }) || plugin_interfaces.exports.iter().any(|pi| {
-                            pi.namespace == ww.namespace
-                                && pi.package == ww.package
-                                && pi.interfaces == ww.interfaces
-                                && pi.version == ww.version
-                        });
-                        if interface_match {
+                    // TODO: Might need to be directional
+                    // Check if plugin supports this interface (ignoring config which is binding-specific)
+                    let interface_match = plugin_interfaces.imports.iter().any(|pi| {
+                        pi.namespace == ww.namespace
+                            && pi.package == ww.package
+                            && pi.interfaces == ww.interfaces
+                            && pi.version == ww.version
+                    }) || plugin_interfaces.exports.iter().any(|pi| {
+                        pi.namespace == ww.namespace
+                            && pi.package == ww.package
+                            && pi.interfaces == ww.interfaces
+                            && pi.version == ww.version
+                    });
+                    if interface_match {
+                        tracing::info!(
+                            "binding plugin {} to workload component {}",
+                            id,
+                            component_idx
+                        );
+                        // Create a unique workload ID for each component
+                        let component_workload_id = format!("{}_{}", workload_id, component_idx);
+                        if let Err(e) = p
+                            .bind_workload(
+                                &component_workload_id,
+                                workload_handle.clone(),
+                                HashSet::from([ww.clone()]),
+                            )
+                            .await
+                        {
+                            tracing::error!(plugin_id = id, component = component_idx, err = ?e, "failed to bind workload to plugin");
+                        } else {
                             tracing::info!(
-                                "binding plugin {} to workload component {}",
-                                id,
-                                component_idx
+                                plugin_id = id,
+                                component = component_idx,
+                                "Successfully bound workload to plugin"
                             );
-                            // Create a unique workload ID for each component
-                            let component_workload_id =
-                                format!("{}_{}", workload_id, component_idx);
-                            if let Err(e) = p
-                                .bind_workload(
-                                    &component_workload_id,
-                                    workload_handle.clone(),
-                                    HashSet::from([ww.clone()]),
-                                )
-                                .await
-                            {
-                                tracing::error!(plugin_id = id, component = component_idx, err = ?e, "failed to bind workload to plugin");
-                            } else {
-                                tracing::info!(
-                                    plugin_id = id,
-                                    component = component_idx,
-                                    "Successfully bound workload to plugin"
-                                );
-                            }
                         }
                     }
                 }
@@ -331,13 +355,16 @@ impl HostApi for Host {
 
         // 4. Starting execution
 
-        // For now, we'll just simulate starting
-        // The workload remains in Starting state until fully initialized
+        // Store the workload with initial state
+        self.workloads.write().await.insert(
+            workload_id.clone(),
+            (request.workload.clone(), WorkloadState::Running),
+        );
         Ok(WorkloadStartResponse {
             workload_status: WorkloadStatus {
                 workload_id,
-                workload_state: WorkloadState::Starting,
-                message: "Workload is starting".to_string(),
+                workload_state: WorkloadState::Running,
+                message: "Workload is running".to_string(),
             },
         })
     }
@@ -346,7 +373,7 @@ impl HostApi for Host {
         &self,
         request: WorkloadStatusRequest,
     ) -> anyhow::Result<WorkloadStatusResponse> {
-        if let Some((_, state)) = self.workloads.get(&request.workload_id) {
+        if let Some((_, state)) = self.workloads.read().await.get(&request.workload_id) {
             Ok(WorkloadStatusResponse {
                 workload_status: WorkloadStatus {
                     workload_id: request.workload_id,
@@ -360,14 +387,19 @@ impl HostApi for Host {
     }
 
     async fn workload_stop(
-        &mut self,
+        &self,
         request: WorkloadStopRequest,
     ) -> anyhow::Result<WorkloadStopResponse> {
-        let (workload_state, message) = if self.workloads.contains_key(&request.workload_id) {
+        let (workload_state, message) = if self
+            .workloads
+            .read()
+            .await
+            .contains_key(&request.workload_id)
+        {
             // Update state to stopping
-            if let Some((_, state)) = self.workloads.get_mut(&request.workload_id) {
-                *state = WorkloadState::Stopping;
-            }
+            // if let Some((_, state)) = self.workloads.get_mut(&request.workload_id) {
+            //     *state = WorkloadState::Stopping;
+            // }
 
             // TODO: Actually stop the workload
             // This would involve:
@@ -376,7 +408,7 @@ impl HostApi for Host {
             // 3. Removing from active workloads
 
             // For now, simulate stopping
-            self.workloads.remove(&request.workload_id);
+            self.workloads.write().await.remove(&request.workload_id);
 
             (
                 WorkloadState::Stopping,
@@ -427,23 +459,24 @@ impl HostBuilder {
         self
     }
 
-    pub fn with_plugin(mut self, id: String, plugin: Arc<dyn Plugin>) -> Self {
-        self.plugins.insert(id, plugin);
+    pub fn with_plugin(mut self, id: impl AsRef<str>, plugin: Arc<dyn Plugin>) -> Self {
+        self.plugins.insert(id.as_ref().to_string(), plugin);
         self
     }
 
-    pub fn with_hostname(mut self, hostname: String) -> Self {
-        self.hostname = Some(hostname);
+    pub fn with_hostname(mut self, hostname: impl AsRef<str>) -> Self {
+        self.hostname = Some(hostname.as_ref().to_string());
         self
     }
 
-    pub fn with_friendly_name(mut self, name: String) -> Self {
-        self.friendly_name = Some(name);
+    pub fn with_friendly_name(mut self, name: impl AsRef<str>) -> Self {
+        self.friendly_name = Some(name.as_ref().to_string());
         self
     }
 
-    pub fn with_label(mut self, key: String, value: String) -> Self {
-        self.labels.insert(key, value);
+    pub fn with_label(mut self, key: impl AsRef<str>, value: impl AsRef<str>) -> Self {
+        self.labels
+            .insert(key.as_ref().to_string(), value.as_ref().to_string());
         self
     }
 
@@ -471,7 +504,7 @@ impl HostBuilder {
 
         Ok(Host {
             engine,
-            workloads: HashMap::new(),
+            workloads: Arc::default(),
             plugins: self.plugins,
             id: uuid::Uuid::new_v4().to_string(),
             hostname,

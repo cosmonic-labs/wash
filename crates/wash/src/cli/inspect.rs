@@ -5,8 +5,10 @@ use tracing::{info, instrument};
 use crate::{
     cli::{CliCommand, CliContext, CommandOutput, component_build::build_component},
     inspect::{decode_component, get_component_wit},
-    oci::{OCI_CACHE_DIR, OciConfig, pull_component},
 };
+use runtime::oci::{OciConfig, pull_component};
+
+pub const OCI_CACHE_DIR: &str = "oci";
 use anyhow::Context;
 use std::path::Path;
 

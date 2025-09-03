@@ -7,9 +7,12 @@ use tracing::instrument;
 
 use crate::{
     cli::{CliCommand, CliContext, CommandOutput},
-    oci::{OCI_CACHE_DIR, OciConfig, pull_component, push_component},
     runtime::bindings::plugin::wasmcloud::wash::types::HookType,
 };
+
+use runtime::oci::{OciConfig, pull_component, push_component};
+
+pub const OCI_CACHE_DIR: &str = "oci";
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum OciCommand {

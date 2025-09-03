@@ -12,8 +12,6 @@ pub mod dev;
 pub mod inspect;
 /// Create new wash projects
 pub mod new;
-/// OCI registry operations for WebAssembly components
-pub mod oci;
 /// Plugin management for wash
 pub mod plugin;
 /// Runtime management for wash

@@ -8,6 +8,9 @@ mod wit;
 mod workload;
 mod workload_handle;
 
+#[cfg(feature = "oci")]
+pub mod oci;
+
 // Public exports for external use
 pub use engine::{Engine, EngineBuilder};
 pub use host::{Host, HostApi, HostBuilder};
@@ -109,16 +112,13 @@ mod test {
         let http_plugin = HttpServer::new("127.0.0.1:8080".parse()?);
         let runtime_config_plugin = RuntimeConfig::default();
 
-        let mut host = HostBuilder::new()
+        let host = HostBuilder::new()
             .with_engine(engine)
             .with_plugin("http".to_string(), Arc::new(http_plugin))
             .with_plugin("config".to_string(), Arc::new(runtime_config_plugin))
             .build()?;
 
-        // Start plugins and host
-        if let Err(e) = host.start().await {
-            tracing::error!(err = ?e, "failed to start host");
-        }
+        let host = host.start().await?;
 
         let req = WorkloadStartRequest {
             workload: Workload {
@@ -137,14 +137,12 @@ mod test {
                     },
                     max_restarts: 3,
                 }),
-                wit_world: Some(crate::workload::WitWorld {
-                    components: vec![],
-                    host_interfaces: vec![],
-                }),
+                components: vec![],
+                host_interfaces: vec![],
                 volumes: vec![],
             },
         };
-        let res = host.workload_start(req).await?;
+        let _res = host.workload_start(req).await?;
 
         Ok(())
     }

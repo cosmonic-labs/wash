@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use tracing::warn;
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime_wasi::{IoView, WasiCtx, WasiCtxBuilder, WasiView};
@@ -180,19 +180,17 @@ impl Engine {
 
         // Initialize all components in wit_world
         let mut workload_handles = Vec::new();
-        if let Some(wit_world) = &workload.wit_world {
-            for (idx, component) in wit_world.components.iter().enumerate() {
-                match self.initialize_workload(component.clone(), &validated_volumes) {
-                    Ok(handle) => {
-                        tracing::debug!("Successfully initialized component {}", idx);
-                        workload_handles.push(handle);
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to initialize component {}: {}", idx, e);
-                        // Decide if we want to fail fast or continue with other components
-                        // For now, we'll fail fast
-                        return Err(e).context(format!("failed to initialize component {}", idx));
-                    }
+        for (idx, component) in workload.components.iter().enumerate() {
+            match self.initialize_workload(component.clone(), &validated_volumes) {
+                Ok(handle) => {
+                    tracing::debug!("Successfully initialized component {}", idx);
+                    workload_handles.push(handle);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to initialize component {}: {}", idx, e);
+                    // Decide if we want to fail fast or continue with other components
+                    // For now, we'll fail fast
+                    bail!(e);
                 }
             }
         }

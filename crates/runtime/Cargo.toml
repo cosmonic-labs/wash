@@ -4,10 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["http", "runtime-config", "wasi-logging"]
+default = ["http", "runtime-config", "wasi-logging", "wasi-blobstore"]
 http = ["dep:wasmtime-wasi-http"]
 runtime-config = []
 wasi-logging = []
+wasi-blobstore = []
+oci = ["dep:oci-client", "dep:oci-wasm", "dep:docker_credential", "dep:sha2", "dep:wit-component"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -30,6 +32,13 @@ wasmtime-wasi-http = { workspace = true, optional = true }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 tokio-rustls = { workspace = true }
+
+# OCI dependencies (optional, behind 'oci' feature)
+docker_credential = { workspace = true, optional = true }
+oci-client = { workspace = true, optional = true, features = ["rustls-tls", "rustls-tls-native-roots"] }
+oci-wasm = { workspace = true, optional = true, features = ["rustls-tls"] }
+sha2 = { workspace = true, optional = true }
+wit-component = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

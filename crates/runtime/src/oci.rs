@@ -1,8 +1,22 @@
-//! OCI registry operations for pulling and pushing WebAssembly components
+//! OCI registry operations for pulling WebAssembly components
 //!
 //! This module provides functionality to interact with OCI registries for
 //! WebAssembly components, including docker credential integration and
-//! file-based caching.
+//! file-based caching. This module is only available when the `oci` feature is enabled.
+//!
+//! # Examples
+//!
+//! ```no_run
+//! use runtime::oci::{pull_component, OciConfig};
+//!
+//! #[tokio::main]
+//! async fn main() -> anyhow::Result<()> {
+//!     let config = OciConfig::default();
+//!     let component_bytes = pull_component("ghcr.io/wasmcloud/components/http-hello-world:latest", config).await?;
+//!     println!("Pulled component of {} bytes", component_bytes.len());
+//!     Ok(())
+//! }
+//! ```
 
 use anyhow::{Context, Result, anyhow, bail};
 use docker_credential::{CredentialRetrievalError, DockerCredential, get_credential};
@@ -16,12 +30,9 @@ use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use tracing::{debug, info, instrument, warn};
 
-use crate::inspect::decode_component;
-
 #[allow(deprecated)]
 #[deprecated = "old media type used before Wasm WG standardization"]
 const WASMCLOUD_MEDIA_TYPE: &str = "application/vnd.module.wasm.content.layer.v1+wasm";
-pub const OCI_CACHE_DIR: &str = "oci";
 
 /// Configuration for OCI operations
 #[derive(Debug, Default, Clone)]
@@ -35,9 +46,26 @@ pub struct OciConfig {
 }
 
 impl OciConfig {
+    /// Create a new OciConfig with a specific cache directory
     pub fn new_with_cache(cache_dir: PathBuf) -> Self {
         Self {
             cache_dir: Some(cache_dir),
+            ..Default::default()
+        }
+    }
+
+    /// Create a new OciConfig with explicit credentials
+    pub fn new_with_credentials(username: String, password: String) -> Self {
+        Self {
+            credentials: Some((username, password)),
+            ..Default::default()
+        }
+    }
+
+    /// Create a new OciConfig for insecure registries (HTTP)
+    pub fn new_insecure() -> Self {
+        Self {
+            insecure: true,
             ..Default::default()
         }
     }
@@ -49,12 +77,12 @@ struct CacheManager {
 }
 
 impl CacheManager {
-    /// Create a new cache manager with the specified or default cache directory
+    /// Create a new cache manager with the specified cache directory
     fn new(cache_dir: PathBuf) -> Self {
         Self { cache_dir }
     }
 
-    /// Get the cache path for a given OCI reference (simplified)
+    /// Get the cache path for a given OCI reference
     fn get_cache_path(&self, reference: &str) -> PathBuf {
         // Hash for uniqueness, but keep the reference in the path for readability
         let mut hasher = Sha256::new();
@@ -164,7 +192,7 @@ impl CredentialResolver {
                 CredentialRetrievalError::ConfigNotFound
                 | CredentialRetrievalError::NoCredentialConfigured,
             ) => Ok(None),
-            // Edge case for Macos, shows as an error when really it's just not found
+            // Edge case for macOS, shows as an error when really it's just not found
             Err(CredentialRetrievalError::HelperFailure { stdout, .. })
                 if stdout.contains("credentials not found in native keychain") =>
             {
@@ -177,12 +205,36 @@ impl CredentialResolver {
 
 /// Pull a WebAssembly component from an OCI registry
 ///
+/// This function pulls a WebAssembly component from an OCI-compliant registry,
+/// validates it, and optionally caches it for future use.
+///
 /// # Arguments
 /// * `reference` - OCI reference (e.g., "registry.io/my/component:v1.0.0")
 /// * `config` - Configuration for the pull operation
 ///
 /// # Returns
 /// Raw bytes of the WebAssembly component
+///
+/// # Errors
+/// Returns an error if:
+/// - The reference is invalid
+/// - The registry is unreachable
+/// - Authentication fails
+/// - The pulled artifact is not a valid WebAssembly component
+/// - Caching operations fail
+///
+/// # Examples
+/// ```no_run
+/// use runtime::oci::{pull_component, OciConfig};
+///
+/// #[tokio::main]
+/// async fn main() -> anyhow::Result<()> {
+///     let config = OciConfig::default();
+///     let component_bytes = pull_component("ghcr.io/wasmcloud/components/http-hello-world:latest", config).await?;
+///     println!("Successfully pulled {} bytes", component_bytes.len());
+///     Ok(())
+/// }
+/// ```
 #[instrument(skip(config), fields(reference = %reference))]
 pub async fn pull_component(reference: &str, config: OciConfig) -> Result<Vec<u8>> {
     info!(reference = %reference, "Pulling component");
@@ -263,6 +315,8 @@ pub async fn pull_component(reference: &str, config: OciConfig) -> Result<Vec<u8
 
 /// Push a WebAssembly component to an OCI registry
 ///
+/// This function validates a WebAssembly component and pushes it to an OCI-compliant registry.
+///
 /// # Arguments
 /// * `reference` - OCI reference (e.g., "registry.io/my/component:v1.0.0")
 /// * `component_data` - Raw bytes of the WebAssembly component
@@ -270,6 +324,28 @@ pub async fn pull_component(reference: &str, config: OciConfig) -> Result<Vec<u8
 ///
 /// # Returns
 /// The digest of the pushed component
+///
+/// # Errors
+/// Returns an error if:
+/// - The reference is invalid
+/// - The component data is not valid WebAssembly
+/// - Authentication fails
+/// - The registry is unreachable
+/// - Push operation fails
+///
+/// # Examples
+/// ```no_run
+/// use runtime::oci::{push_component, OciConfig};
+///
+/// #[tokio::main]
+/// async fn main() -> anyhow::Result<()> {
+///     let component_bytes = std::fs::read("my-component.wasm")?;
+///     let config = OciConfig::default();
+///     let digest = push_component("registry.example.com/my-component:latest", &component_bytes, config).await?;
+///     println!("Pushed component with digest: {}", digest);
+///     Ok(())
+/// }
+/// ```
 #[instrument(skip(component_data, config), fields(reference = %reference, size = component_data.len()))]
 pub async fn push_component(
     reference: &str,
@@ -343,15 +419,68 @@ pub async fn push_component(
 /// Validate that the provided bytes represent a valid WebAssembly component
 ///
 /// This function parses the WebAssembly bytes and validates that they form
-/// a valid WebAssembly component or a WIT package, not just a raw module.
+/// a valid WebAssembly component, not just a raw module.
+///
+/// # Arguments
+/// * `data` - The raw bytes to validate
+///
+/// # Returns
+/// Returns `Ok(())` if the data represents a valid WebAssembly component,
+/// otherwise returns an error describing why validation failed.
+///
+/// # Examples
+/// ```no_run
+/// use runtime::oci::validate_component;
+///
+/// #[tokio::main]
+/// async fn main() -> anyhow::Result<()> {
+///     let component_bytes = std::fs::read("my-component.wasm")?;
+///     validate_component(&component_bytes).await?;
+///     println!("Component is valid!");
+///     Ok(())
+/// }
+/// ```
 pub async fn validate_component(data: &[u8]) -> Result<()> {
-    decode_component(data).await.map(|_| ())
+    wit_component::decode_reader(data)
+        .context("failed to decode component bytes")
+        .map(|_| ())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_oci_config_default() {
+        let config = OciConfig::default();
+        assert!(config.credentials.is_none());
+        assert!(!config.insecure);
+        assert!(config.cache_dir.is_none());
+    }
+
+    #[test]
+    fn test_oci_config_with_cache() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = OciConfig::new_with_cache(temp_dir.path().to_path_buf());
+        assert!(config.cache_dir.is_some());
+        assert!(!config.insecure);
+    }
+
+    #[test]
+    fn test_oci_config_with_credentials() {
+        let config = OciConfig::new_with_credentials("user".to_string(), "pass".to_string());
+        assert_eq!(
+            config.credentials,
+            Some(("user".to_string(), "pass".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_oci_config_insecure() {
+        let config = OciConfig::new_insecure();
+        assert!(config.insecure);
+    }
 
     #[test]
     fn test_cache_manager_path_generation() {
@@ -362,15 +491,7 @@ mod tests {
         let cache_path = cache_manager.get_cache_path(reference);
 
         assert!(cache_path.starts_with(temp_dir.path()));
-        assert!(cache_path.extension().unwrap() == "wasm");
-    }
-
-    #[test]
-    fn test_oci_config_default() {
-        let config = OciConfig::default();
-        assert!(config.credentials.is_none());
-        assert!(!config.insecure);
-        assert!(config.cache_dir.is_none());
+        assert_eq!(cache_path.extension().unwrap(), "wasm");
     }
 
     #[tokio::test]
@@ -399,21 +520,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_validate_component_invalid_data() {
+        let invalid_data = b"not wasm data";
+        let result = validate_component(invalid_data).await;
+        assert!(result.is_err());
+    }
+
+    // Integration test with real registry - only run when OCI_INTEGRATION_TESTS env var is set
+    #[tokio::test]
     async fn test_pull_and_validate_ghcr_component() {
-        // Use the public OCI reference
+        // Skip this test unless integration tests are explicitly enabled
+        if std::env::var("OCI_INTEGRATION_TESTS").is_err() {
+            return;
+        }
+
+        // Use public OCI references for testing
         let references = vec![
-            // wasmCloud old hello world component
+            // wasmCloud hello world component
             "ghcr.io/wasmcloud/components/http-hello-world-rust:0.1.0",
-            // Published interface
-            "ghcr.io/wasmcloud/interfaces/wasmcloud/secrets:0.1.0-draft",
             // Bytecode Alliance sample component
             "ghcr.io/bytecodealliance/sample-wasi-http-rust/sample-wasi-http-rust:latest",
         ];
-        let config = OciConfig {
-            credentials: None,
-            insecure: false,
-            cache_dir: None,
-        };
+
+        let config = OciConfig::default();
 
         // Pull the component anonymously
         for reference in references {

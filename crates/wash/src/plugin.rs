@@ -14,9 +14,12 @@ use std::{
 use tokio::sync::RwLock;
 use tracing::{debug, info, instrument};
 
+use runtime::oci::{OciConfig, pull_component};
+
+pub const OCI_CACHE_DIR: &str = "oci";
+
 use crate::{
     cli::CliContext,
-    oci::{OCI_CACHE_DIR, OciConfig, pull_component},
     runtime::{
         Ctx,
         bindings::{

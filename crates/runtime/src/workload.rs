@@ -1,13 +1,16 @@
 use bytes::Bytes;
 use std::collections::HashMap;
 
+use crate::WitInterface;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Workload {
     pub namespace: String,
     pub name: String,
     pub annotations: HashMap<String, String>,
     pub service: Option<Service>,
-    pub wit_world: Option<WitWorld>,
+    pub components: Vec<Component>,
+    pub host_interfaces: Vec<WitInterface>,
     pub volumes: Vec<Volume>,
 }
 
@@ -28,13 +31,6 @@ pub struct Service {
     pub max_restarts: u64,
 }
 
-// TODO: Rename this to something else, this is just a collection of components.
-#[derive(Debug, Clone, PartialEq)]
-pub struct WitWorld {
-    pub components: Vec<Component>,
-    pub host_interfaces: Vec<crate::WitInterface>,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct Component {
     pub bytes: Bytes,
@@ -50,6 +46,18 @@ pub struct LocalResources {
     pub config: HashMap<String, String>,
     pub volume_mounts: Vec<VolumeMount>,
     pub allowed_hosts: Vec<String>,
+}
+
+impl Default for LocalResources {
+    fn default() -> Self {
+        Self {
+            memory_limit_mb: -1,
+            cpu_limit: -1,
+            config: HashMap::new(),
+            volume_mounts: Vec::new(),
+            allowed_hosts: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
