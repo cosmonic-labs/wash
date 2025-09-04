@@ -17,7 +17,7 @@ pub use host::{Host, HostApi, HostBuilder};
 pub use plugin::Plugin;
 pub use wit::WitInterface;
 pub use workload::*;
-pub use workload_handle::WorkloadHandle;
+pub use workload_handle::{UnresolvedWorkloadHandle, WorkloadHandle};
 
 // service wasi:cli/run
 // workload-a and workload-b both export foo:bar/interface
@@ -114,8 +114,8 @@ mod test {
 
         let host = HostBuilder::new()
             .with_engine(engine)
-            .with_plugin("http".to_string(), Arc::new(http_plugin))
-            .with_plugin("config".to_string(), Arc::new(runtime_config_plugin))
+            .with_plugin(Arc::new(http_plugin))
+            .with_plugin(Arc::new(runtime_config_plugin))
             .build()?;
 
         let host = host.start().await?;

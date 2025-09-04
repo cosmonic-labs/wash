@@ -1,8 +1,12 @@
+use std::collections::{HashMap, HashSet};
+
 use anyhow::bail;
 
+const WASI_LOGGING_ID: &str = "wasi-logging";
+
 use crate::{
-    Plugin, WorkloadHandle, engine::Ctx,
-    plugin::wasi_logging::bindings::wasi::logging::logging::Level,
+    Plugin, UnresolvedWorkloadHandle, WitInterface, engine::Ctx,
+    plugin::wasi_logging::bindings::wasi::logging::logging::Level, wit::WitWorld,
 };
 
 mod bindings {
@@ -31,10 +35,27 @@ impl bindings::wasi::logging::logging::Host for Ctx {
 
 #[async_trait::async_trait]
 impl Plugin for WasiLogging {
+    fn id(&self) -> &'static str {
+        WASI_LOGGING_ID
+    }
+
+    fn world(&self) -> WitWorld {
+        WitWorld {
+            imports: HashSet::from([WitInterface {
+                namespace: "wasi".to_string(),
+                package: "logging".to_string(),
+                interfaces: vec!["logging".to_string()],
+                version: Some(semver::Version::parse("0.1.0-draft").unwrap()),
+                config: HashMap::default(),
+            }]),
+            exports: HashSet::default(),
+        }
+    }
+
     async fn bind_workload(
         &self,
         _id: &String,
-        mut workload_handle: WorkloadHandle,
+        workload_handle: &mut UnresolvedWorkloadHandle,
         interfaces: std::collections::HashSet<crate::wit::WitInterface>,
     ) -> anyhow::Result<()> {
         // Ensure exactly one interface: "wasi:logging/logging"

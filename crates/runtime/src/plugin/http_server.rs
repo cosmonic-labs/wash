@@ -1,7 +1,9 @@
 use std::{collections::HashMap, net::SocketAddr, path::Path, sync::Arc};
 
+const HTTP_SERVER_ID: &str = "http-server";
+
 use crate::wit::WitWorld;
-use crate::{Plugin, WorkloadHandle, engine::Ctx};
+use crate::{Plugin, UnresolvedWorkloadHandle, WorkloadHandle, engine::Ctx};
 use anyhow::{Context, bail, ensure};
 use hyper::server::conn::http1;
 use tokio::net::TcpListener;
@@ -20,10 +22,19 @@ use rustls_pemfile::{certs, private_key};
 use tokio::sync::{RwLock, mpsc};
 use tokio_rustls::TlsAcceptor;
 
+#[derive(Clone, Debug)]
+struct HttpWorkloadConfig {
+    host_header: String,
+    // Future: port, path prefix, middleware config, etc.
+}
+
 pub struct HttpServer {
     addr: SocketAddr,
-    // Map from host header to workload handles
+    // TODO: support round robining between workload handles
+    /// Map from host header to resolved workload handles
     workload_handles: Arc<RwLock<HashMap<String, WorkloadHandle>>>,
+    /// Map from workload ID to HTTP-specific config
+    workload_configs: Arc<RwLock<HashMap<String, HttpWorkloadConfig>>>,
     shutdown_tx: Arc<RwLock<Option<mpsc::Sender<()>>>>,
     tls_acceptor: Option<TlsAcceptor>,
 }
@@ -33,6 +44,7 @@ impl HttpServer {
         Self {
             addr,
             workload_handles: Arc::default(),
+            workload_configs: Arc::default(),
             shutdown_tx: Arc::new(RwLock::new(None)),
             tls_acceptor: None,
         }
@@ -51,6 +63,7 @@ impl HttpServer {
         Ok(Self {
             addr,
             workload_handles: Arc::default(),
+            workload_configs: Arc::default(),
             shutdown_tx: Arc::new(RwLock::new(None)),
             tls_acceptor: Some(tls_acceptor),
         })
@@ -59,6 +72,9 @@ impl HttpServer {
 
 #[async_trait::async_trait]
 impl Plugin for HttpServer {
+    fn id(&self) -> &'static str {
+        HTTP_SERVER_ID
+    }
     fn world(&self) -> WitWorld {
         let mut interfaces = std::collections::HashSet::new();
         interfaces.insert(crate::wit::WitInterface {
@@ -107,7 +123,7 @@ impl Plugin for HttpServer {
     async fn bind_workload(
         &self,
         id: &String,
-        workload_handle: WorkloadHandle,
+        _workload_handle: &mut UnresolvedWorkloadHandle,
         interfaces: std::collections::HashSet<crate::wit::WitInterface>,
     ) -> anyhow::Result<()> {
         let Some(http_iface) = interfaces.iter().find(|iface| {
@@ -134,21 +150,49 @@ impl Plugin for HttpServer {
         }
 
         // Use wildcard "*" as default if no host header is specified
-        let host_header = http_iface.config.get("host")
+        let host_header = http_iface
+            .config
+            .get("host")
             .cloned()
             .unwrap_or_else(|| "*".to_string());
 
-        debug!(host = %host_header, workload_id = id, "binding host header to workload");
+        debug!(host = %host_header, workload_id = id, "binding HTTP config for workload");
+
+        // Store config by workload ID for later retrieval
+        let config = HttpWorkloadConfig { host_header };
+        self.workload_configs
+            .write()
+            .await
+            .insert(id.clone(), config);
 
         // NOTE: There is no `add_to_linker` call here because it's already added when initializing
         // the Ctx, as long as the `http` feature is enabled. This is totally possible to do here, but it would
         // mean re-implementing wasmtime_wasi_http.
 
-        // Store the workload handle for this host header
+        Ok(())
+    }
+
+    async fn on_workload_resolved(
+        &self,
+        id: &String,
+        resolved_handle: &WorkloadHandle,
+    ) -> anyhow::Result<()> {
+        // Retrieve config using the same ID from bind_workload
+        let config = self
+            .workload_configs
+            .read()
+            .await
+            .get(id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("No HTTP config found for workload {}", id))?;
+
+        debug!(host = %config.host_header, workload_id = id, "storing resolved workload handle");
+
+        // Store the resolved handle with the configured host header
         self.workload_handles
             .write()
             .await
-            .insert(host_header.clone(), workload_handle);
+            .insert(config.host_header, resolved_handle.clone());
 
         Ok(())
     }
@@ -262,7 +306,7 @@ async fn handle_http_request(
     let workload_handle = {
         let handles = workload_handles.read().await;
         debug!(host = %host_header, "looking up workload handle for host header");
-        
+
         // First try exact host match
         if let Some(handle) = handles.get(&host_header) {
             Some(handle.clone())
@@ -302,11 +346,11 @@ async fn invoke_component_handler(
     workload_handle: WorkloadHandle,
     req: hyper::Request<hyper::body::Incoming>,
 ) -> anyhow::Result<hyper::Response<HyperOutgoingBody>> {
-    // Create a new store for this request
+    // Create a new store for this request with plugin contexts
     let mut store = workload_handle.new_store();
 
     // Get the pre-instantiated component
-    let instance_pre = workload_handle.instance_pre();
+    let instance_pre = workload_handle.instantiate_pre()?;
 
     // Use the same implementation as dev.rs
     handle_component_request(store.as_context_mut(), instance_pre, req).await

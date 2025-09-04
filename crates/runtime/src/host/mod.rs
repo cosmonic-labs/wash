@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
@@ -64,7 +65,7 @@ pub struct Host {
     /// Workloads mapped from ID to the workload and its current state
     workloads: Arc<RwLock<HashMap<String, (Workload, WorkloadState)>>>,
     /// Plugins in a map from their ID to the plugin itself
-    plugins: HashMap<String, Arc<dyn Plugin>>,
+    plugins: HashMap<&'static str, Arc<dyn Plugin>>,
     /// Host metadata
     id: String,
     hostname: String,
@@ -295,13 +296,18 @@ impl HostApi for Host {
         );
 
         // Start the workload using the engine
-        let (_service, workload_handles) = self.engine.start_workload(request.workload.clone())?;
+        let (_service, mut unresolved_handles) =
+            self.engine.start_workload(request.workload.clone())?;
 
-        // Bind plugins to all workload handles
-        for (component_idx, workload_handle) in workload_handles.iter().enumerate() {
+        // Phase 1: Bind plugins to all unresolved workload handles
+        let mut component_workload_ids = Vec::new();
+        for (component_idx, mut unresolved_handle) in unresolved_handles.iter_mut().enumerate() {
             tracing::debug!("Binding plugins for component {}", component_idx);
+            let component_workload_id = self.generate_workload_id();
+            component_workload_ids.push(component_workload_id.clone());
 
-            for ww in host_interfaces {
+            // TODO: no reverse, hack
+            for ww in host_interfaces.iter().rev() {
                 tracing::info!(interface = ?ww, component = component_idx, "Checking interface for plugin binding");
                 for (id, p) in &self.plugins {
                     let plugin_interfaces = p.world();
@@ -326,12 +332,10 @@ impl HostApi for Host {
                             id,
                             component_idx
                         );
-                        // Create a unique workload ID for each component
-                        let component_workload_id = format!("{}_{}", workload_id, component_idx);
                         if let Err(e) = p
                             .bind_workload(
                                 &component_workload_id,
-                                workload_handle.clone(),
+                                &mut unresolved_handle,
                                 HashSet::from([ww.clone()]),
                             )
                             .await
@@ -345,6 +349,40 @@ impl HostApi for Host {
                             );
                         }
                     }
+                }
+            }
+        }
+
+        // Phase 2: Create resolved handles from unresolved ones
+        let mut resolved_handles = Vec::new();
+        for unresolved_handle in unresolved_handles {
+            // Collect plugin contexts - provide all plugins to resolved handles
+            let mut plugins: HashMap<&'static str, Arc<dyn Any + Send + Sync>> =
+                std::collections::HashMap::new();
+            for (id, plugin) in &self.plugins {
+                tracing::debug!("Adding plugin '{id}' to context");
+                plugins.insert(id, plugin.clone() as Arc<dyn Any + Send + Sync>);
+            }
+            let resolved_handle = unresolved_handle.resolve(plugins);
+            resolved_handles.push(resolved_handle);
+        }
+
+        // Phase 3: Notify plugins that need resolved handles
+        for (component_idx, resolved_handle) in resolved_handles.iter().enumerate() {
+            let component_workload_id = &component_workload_ids[component_idx];
+
+            for (plugin_id, p) in &self.plugins {
+                if let Err(e) = p
+                    .on_workload_resolved(component_workload_id, resolved_handle)
+                    .await
+                {
+                    tracing::error!(plugin_id = plugin_id, component = component_idx, err = ?e, "failed to notify plugin of resolved workload");
+                } else {
+                    tracing::debug!(
+                        plugin_id = plugin_id,
+                        component = component_idx,
+                        "Successfully notified plugin of resolved workload"
+                    );
                 }
             }
         }
@@ -431,7 +469,7 @@ impl HostApi for Host {
 /// Builder for the [`Host`]
 pub struct HostBuilder {
     engine: Option<Engine>,
-    plugins: HashMap<String, Arc<dyn Plugin>>,
+    plugins: HashMap<&'static str, Arc<dyn Plugin>>,
     hostname: Option<String>,
     friendly_name: Option<String>,
     labels: HashMap<String, String>,
@@ -459,8 +497,18 @@ impl HostBuilder {
         self
     }
 
-    pub fn with_plugin(mut self, id: impl AsRef<str>, plugin: Arc<dyn Plugin>) -> Self {
-        self.plugins.insert(id.as_ref().to_string(), plugin);
+    pub fn with_plugin<T: Plugin>(mut self, plugin: Arc<T>) -> Self {
+        let plugin_id = plugin.id();
+
+        // Check for duplicate plugin IDs
+        if self.plugins.contains_key(plugin_id) {
+            panic!(
+                "Duplicate plugin ID '{}' - plugin IDs must be unique",
+                plugin_id
+            );
+        }
+
+        self.plugins.insert(plugin_id, plugin);
         self
     }
 

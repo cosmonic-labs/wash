@@ -1,5 +1,5 @@
 use std::{
-    any::{Any, TypeId},
+    any::Any,
     collections::HashMap,
     sync::Arc,
 };
@@ -10,7 +10,7 @@ use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime_wasi::{IoView, WasiCtx, WasiCtxBuilder, WasiView};
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpView};
 
-use crate::{EmptyDirVolume, HostPathVolume, Plugin, VolumeType, WorkloadHandle};
+use crate::{EmptyDirVolume, HostPathVolume, Plugin, UnresolvedWorkloadHandle, VolumeType};
 use std::path::PathBuf;
 
 /// The context for a component store and linker, providing access to implementations of:
@@ -25,17 +25,28 @@ pub struct Ctx {
     pub ctx: WasiCtx,
     /// The HTTP context used to provide HTTP functionality to the component.
     pub http: WasiHttpCtx,
-    /// The configuration for the plugins associated with this context. Plugins will
-    /// be able to use [`Ctx::get_config`] to fetch their own configuration.
-    // plugin_config: HashMap<TypeId, HashMap<String, String>>,
-    plugins: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+    /// Plugin instances stored by string ID for access during component execution
+    plugins: HashMap<&'static str, Arc<dyn Any + Send + Sync>>,
 }
 
 impl Ctx {
-    pub fn get_plugin<T: Plugin + 'static>(&self) -> Option<Arc<T>> {
-        self.plugins
-            .get(&TypeId::of::<T>())
-            .and_then(|arc| Arc::downcast::<T>(arc.clone()).ok())
+    /// Get a plugin by its string ID and downcast to the expected type
+    ///
+    /// # Usage
+    /// ```rust
+    /// let plugin = ctx.get_plugin::<MyPlugin>("my_plugin_id");
+    /// ```
+    pub fn get_plugin<T: Plugin + 'static>(&self, plugin_id: &str) -> Option<Arc<T>> {
+        self.plugins.get(plugin_id)?.clone().downcast().ok()
+    }
+
+    /// Inject plugin instances into this Ctx
+    pub fn with_plugins(
+        mut self,
+        plugins: HashMap<&'static str, Arc<dyn Any + Send + Sync>>,
+    ) -> Self {
+        self.plugins.extend(plugins);
+        self
     }
 }
 
@@ -138,7 +149,10 @@ impl Engine {
     pub fn start_workload(
         &self,
         workload: crate::workload::Workload,
-    ) -> anyhow::Result<(Option<crate::workload::Service>, Vec<WorkloadHandle>)> {
+    ) -> anyhow::Result<(
+        Option<crate::workload::Service>,
+        Vec<UnresolvedWorkloadHandle>,
+    )> {
         // Handle optional service - just validate for now, don't create handle yet
         let service = if let Some(svc) = &workload.service {
             warn!(
@@ -198,14 +212,15 @@ impl Engine {
         Ok((service, workload_handles))
     }
 
+    // TODO: implement
     pub fn stop_workload() {}
 
-    /// Initialize a workload component and return a WorkloadHandle
+    /// Initialize a workload component and return an UnresolvedWorkloadHandle
     fn initialize_workload(
         &self,
         component: crate::workload::Component,
         validated_volumes: &std::collections::HashMap<String, PathBuf>,
-    ) -> anyhow::Result<WorkloadHandle> {
+    ) -> anyhow::Result<UnresolvedWorkloadHandle> {
         // Create a wasmtime component from the bytes
         let wasmtime_component = Component::new(&self.inner, component.bytes)
             .context("failed to create component from bytes")?;
@@ -221,11 +236,6 @@ impl Engine {
         wasmtime_wasi_http::add_only_http_to_linker_async(&mut linker)
             .context("failed to add wasi:http/types to linker")?;
 
-        // Pre-instantiate the component
-        let instance_pre = linker
-            .instantiate_pre(&wasmtime_component)
-            .context("failed to pre-instantiate component")?;
-
         // Build volume mounts for this component by looking up validated volumes
         let mut component_volume_mounts = Vec::new();
         for vm in &component.local_resources.volume_mounts {
@@ -239,11 +249,11 @@ impl Engine {
             }
         }
 
-        // Create the WorkloadHandle with volume mounts
+        // Create the UnresolvedWorkloadHandle with volume mounts
         // TODO: Pass component configuration (pool_size, max_invocations) to WorkloadHandle
-        Ok(WorkloadHandle::new(
+        Ok(UnresolvedWorkloadHandle::new(
             self.clone(),
-            instance_pre,
+            wasmtime_component,
             linker,
             component_volume_mounts,
         ))

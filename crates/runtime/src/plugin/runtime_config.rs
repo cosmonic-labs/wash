@@ -1,7 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 
-use crate::{Plugin, WorkloadHandle, engine::Ctx};
+const RUNTIME_CONFIG_ID: &str = "runtime-config";
+
+use crate::{Plugin, UnresolvedWorkloadHandle, engine::Ctx};
 
 mod bindings {
     wasmtime::component::bindgen!({
@@ -21,7 +23,7 @@ pub struct RuntimeConfig {
 
 impl Host for Ctx {
     async fn get(&mut self, key: String) -> anyhow::Result<Result<Option<String>, ConfigError>> {
-        let Some(plugin) = self.get_plugin::<RuntimeConfig>() else {
+        let Some(plugin) = self.get_plugin::<RuntimeConfig>(RUNTIME_CONFIG_ID) else {
             return Ok(Ok(None));
         };
         let config_guard = plugin.config.read().await;
@@ -32,7 +34,7 @@ impl Host for Ctx {
     }
 
     async fn get_all(&mut self) -> anyhow::Result<Result<Vec<(String, String)>, ConfigError>> {
-        let Some(plugin) = self.get_plugin::<RuntimeConfig>() else {
+        let Some(plugin) = self.get_plugin::<RuntimeConfig>(RUNTIME_CONFIG_ID) else {
             return Ok(Ok(vec![]));
         };
         let config_guard = plugin.config.read().await;
@@ -46,10 +48,13 @@ impl Host for Ctx {
 
 #[async_trait::async_trait]
 impl Plugin for RuntimeConfig {
+    fn id(&self) -> &'static str {
+        RUNTIME_CONFIG_ID
+    }
     async fn bind_workload(
         &self,
         id: &String,
-        mut workload_handle: WorkloadHandle,
+        workload_handle: &mut UnresolvedWorkloadHandle,
         interfaces: std::collections::HashSet<crate::wit::WitInterface>,
     ) -> anyhow::Result<()> {
         // Find the "wasi:config/runtime" interface, if present
