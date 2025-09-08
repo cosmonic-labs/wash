@@ -301,7 +301,7 @@ impl HostApi for Host {
 
         // Phase 1: Bind plugins to all unresolved workload handles
         let mut component_workload_ids = Vec::new();
-        for (component_idx, mut unresolved_handle) in unresolved_handles.iter_mut().enumerate() {
+        for (component_idx, unresolved_handle) in unresolved_handles.iter_mut().enumerate() {
             tracing::debug!("Binding plugins for component {}", component_idx);
             let component_workload_id = self.generate_workload_id();
             component_workload_ids.push(component_workload_id.clone());
@@ -335,7 +335,7 @@ impl HostApi for Host {
                         if let Err(e) = p
                             .bind_workload(
                                 &component_workload_id,
-                                &mut unresolved_handle,
+                                unresolved_handle,
                                 HashSet::from([ww.clone()]),
                             )
                             .await
@@ -467,24 +467,13 @@ impl HostApi for Host {
 }
 
 /// Builder for the [`Host`]
+#[derive(Default)]
 pub struct HostBuilder {
     engine: Option<Engine>,
     plugins: HashMap<&'static str, Arc<dyn Plugin>>,
     hostname: Option<String>,
     friendly_name: Option<String>,
     labels: HashMap<String, String>,
-}
-
-impl Default for HostBuilder {
-    fn default() -> Self {
-        Self {
-            engine: None,
-            plugins: HashMap::new(),
-            hostname: None,
-            friendly_name: None,
-            labels: HashMap::new(),
-        }
-    }
 }
 
 impl HostBuilder {
@@ -497,19 +486,16 @@ impl HostBuilder {
         self
     }
 
-    pub fn with_plugin<T: Plugin>(mut self, plugin: Arc<T>) -> Self {
+    pub fn with_plugin<T: Plugin>(mut self, plugin: Arc<T>) -> anyhow::Result<Self> {
         let plugin_id = plugin.id();
 
         // Check for duplicate plugin IDs
         if self.plugins.contains_key(plugin_id) {
-            panic!(
-                "Duplicate plugin ID '{}' - plugin IDs must be unique",
-                plugin_id
-            );
+            bail!("Duplicate plugin ID '{plugin_id}' - plugin IDs must be unique");
         }
 
         self.plugins.insert(plugin_id, plugin);
-        self
+        Ok(self)
     }
 
     pub fn with_hostname(mut self, hostname: impl AsRef<str>) -> Self {

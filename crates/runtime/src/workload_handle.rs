@@ -1,5 +1,4 @@
 use std::{any::Any, collections::HashMap, path::PathBuf, sync::Arc};
-use tracing;
 use wasmtime::Store;
 use wasmtime::component::{Component, InstancePre, Linker};
 use wasmtime_wasi::WasiCtxBuilder;
@@ -11,6 +10,8 @@ use crate::workload::VolumeMount;
 /// This is created during the initial workload setup and passed to plugins during binding.
 #[derive(Clone)]
 pub struct UnresolvedWorkloadHandle {
+    /// The unique identifier for the workload component
+    id: String,
     /// The [`Engine`] used to compile this component
     engine: Engine,
     /// The compiled [`Component`]
@@ -24,12 +25,14 @@ pub struct UnresolvedWorkloadHandle {
 impl UnresolvedWorkloadHandle {
     /// Creates a new UnresolvedWorkloadHandle
     pub fn new(
+        id: String,
         engine: Engine,
         component: Component,
         linker: Linker<Ctx>,
         volume_mounts: Vec<(PathBuf, VolumeMount)>,
     ) -> Self {
         Self {
+            id,
             engine,
             component,
             linker,
@@ -85,8 +88,7 @@ impl UnresolvedWorkloadHandle {
             WasiCtxBuilder::new().inherit_stderr().build()
         };
 
-        // TODO: ensure this shouldn't be coming from the workload
-        CtxBuilder::new(uuid::Uuid::new_v4().to_string())
+        CtxBuilder::new(self.id.clone())
             .with_wasi_ctx(wasi_ctx)
             .build()
     }

@@ -44,8 +44,8 @@ async fn test_http_blobstore_integration() -> Result<()> {
     // Build host with plugins following the existing pattern from lib.rs test
     let host = HostBuilder::new()
         .with_engine(engine.clone())
-        .with_plugin(Arc::new(http_plugin))
-        .with_plugin(Arc::new(blobstore_plugin))
+        .with_plugin(Arc::new(http_plugin))?
+        .with_plugin(Arc::new(blobstore_plugin))?
         .build()?;
 
     println!("Created host with HTTP and blobstore plugins");
@@ -174,12 +174,12 @@ async fn test_plugin_isolation() -> Result<()> {
     // Create two identical hosts with blobstore plugins
     let _host1 = HostBuilder::new()
         .with_engine(engine.clone())
-        .with_plugin(Arc::new(blobstore1))
+        .with_plugin(Arc::new(blobstore1))?
         .build()?;
 
     let _host2 = HostBuilder::new()
         .with_engine(engine.clone())
-        .with_plugin(Arc::new(blobstore2))
+        .with_plugin(Arc::new(blobstore2))?
         .build()?;
 
     // Both should be independent instances
@@ -200,7 +200,7 @@ async fn test_plugin_lifecycle() -> Result<()> {
 
     let host = HostBuilder::new()
         .with_engine(engine)
-        .with_plugin(Arc::new(http_plugin))
+        .with_plugin(Arc::new(http_plugin))?
         .build()?;
 
     // Start host

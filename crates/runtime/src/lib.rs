@@ -114,8 +114,8 @@ mod test {
 
         let host = HostBuilder::new()
             .with_engine(engine)
-            .with_plugin(Arc::new(http_plugin))
-            .with_plugin(Arc::new(runtime_config_plugin))
+            .with_plugin(Arc::new(http_plugin))?
+            .with_plugin(Arc::new(runtime_config_plugin))?
             .build()?;
 
         let host = host.start().await?;
@@ -125,18 +125,7 @@ mod test {
                 namespace: "test".to_string(),
                 name: "test-workload".to_string(),
                 annotations: HashMap::new(),
-                service: Some(crate::workload::Service {
-                    // TODO: Pull from file, integration test.
-                    bytes: bytes::Bytes::from_static(b"whee component"),
-                    local_resources: crate::workload::LocalResources {
-                        memory_limit_mb: 256,
-                        cpu_limit: 1,
-                        config: HashMap::new(),
-                        volume_mounts: vec![],
-                        allowed_hosts: vec![],
-                    },
-                    max_restarts: 3,
-                }),
+                service: None,
                 components: vec![],
                 host_interfaces: vec![],
                 volumes: vec![],

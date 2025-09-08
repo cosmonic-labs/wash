@@ -54,7 +54,7 @@ impl Plugin for WasiLogging {
 
     async fn bind_workload(
         &self,
-        _id: &String,
+        _id: &str,
         workload_handle: &mut UnresolvedWorkloadHandle,
         interfaces: std::collections::HashSet<crate::wit::WitInterface>,
     ) -> anyhow::Result<()> {

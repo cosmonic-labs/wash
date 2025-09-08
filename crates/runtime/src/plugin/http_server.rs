@@ -92,7 +92,7 @@ impl Plugin for HttpServer {
     }
 
     async fn start(&self) -> anyhow::Result<()> {
-        let addr = self.addr.clone();
+        let addr = self.addr;
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
         let shutdown_tx_clone = self.shutdown_tx.clone();
         let workload_handles = self.workload_handles.clone();
@@ -122,7 +122,7 @@ impl Plugin for HttpServer {
 
     async fn bind_workload(
         &self,
-        id: &String,
+        id: &str,
         _workload_handle: &mut UnresolvedWorkloadHandle,
         interfaces: std::collections::HashSet<crate::wit::WitInterface>,
     ) -> anyhow::Result<()> {
@@ -163,7 +163,7 @@ impl Plugin for HttpServer {
         self.workload_configs
             .write()
             .await
-            .insert(id.clone(), config);
+            .insert(id.to_string(), config);
 
         // NOTE: There is no `add_to_linker` call here because it's already added when initializing
         // the Ctx, as long as the `http` feature is enabled. This is totally possible to do here, but it would
@@ -174,7 +174,7 @@ impl Plugin for HttpServer {
 
     async fn on_workload_resolved(
         &self,
-        id: &String,
+        id: &str,
         resolved_handle: &WorkloadHandle,
     ) -> anyhow::Result<()> {
         // Retrieve config using the same ID from bind_workload

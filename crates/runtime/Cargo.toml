@@ -4,11 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["http", "runtime-config", "wasi-logging", "wasi-blobstore"]
+default = ["http", "runtime-config", "wasi-logging", "wasi-blobstore", "wasi-keyvalue"]
 http = ["dep:wasmtime-wasi-http"]
 runtime-config = []
 wasi-logging = []
 wasi-blobstore = []
+wasi-keyvalue = []
 oci = ["dep:oci-client", "dep:oci-wasm", "dep:docker_credential", "dep:sha2", "dep:wit-component"]
 
 [dependencies]

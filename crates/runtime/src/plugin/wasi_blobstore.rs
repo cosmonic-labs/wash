@@ -905,7 +905,7 @@ impl Plugin for WasiBlobstore {
 
     async fn bind_workload(
         &self,
-        id: &String,
+        id: &str,
         workload_handle: &mut UnresolvedWorkloadHandle,
         interfaces: std::collections::HashSet<crate::wit::WitInterface>,
     ) -> anyhow::Result<()> {
@@ -942,7 +942,7 @@ impl Plugin for WasiBlobstore {
 
         // Initialize storage for this workload
         let mut storage = self.storage.write().await;
-        storage.insert(id.clone(), HashMap::new());
+        storage.insert(id.to_string(), HashMap::new());
 
         tracing::debug!("WasiBlobstore plugin bound to workload '{id}'");
 
@@ -951,7 +951,7 @@ impl Plugin for WasiBlobstore {
 
     async fn unbind_workload(
         &self,
-        id: &String,
+        id: &str,
         mut _workload_handle: crate::WorkloadHandle,
         _interfaces: std::collections::HashSet<crate::wit::WitInterface>,
     ) -> anyhow::Result<()> {

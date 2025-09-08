@@ -1,8 +1,4 @@
-use std::{
-    any::Any,
-    collections::HashMap,
-    sync::Arc,
-};
+use std::{any::Any, collections::HashMap, sync::Arc};
 
 use anyhow::{Context, bail};
 use tracing::warn;
@@ -33,7 +29,7 @@ impl Ctx {
     /// Get a plugin by its string ID and downcast to the expected type
     ///
     /// # Usage
-    /// ```rust
+    /// ```no_run
     /// let plugin = ctx.get_plugin::<MyPlugin>("my_plugin_id");
     /// ```
     pub fn get_plugin<T: Plugin + 'static>(&self, plugin_id: &str) -> Option<Arc<T>> {
@@ -195,7 +191,11 @@ impl Engine {
         // Initialize all components in wit_world
         let mut workload_handles = Vec::new();
         for (idx, component) in workload.components.iter().enumerate() {
-            match self.initialize_workload(component.clone(), &validated_volumes) {
+            match self.initialize_workload(
+                uuid::Uuid::new_v4().to_string(),
+                component.clone(),
+                &validated_volumes,
+            ) {
                 Ok(handle) => {
                     tracing::debug!("Successfully initialized component {}", idx);
                     workload_handles.push(handle);
@@ -218,6 +218,7 @@ impl Engine {
     /// Initialize a workload component and return an UnresolvedWorkloadHandle
     fn initialize_workload(
         &self,
+        id: String,
         component: crate::workload::Component,
         validated_volumes: &std::collections::HashMap<String, PathBuf>,
     ) -> anyhow::Result<UnresolvedWorkloadHandle> {
@@ -231,6 +232,7 @@ impl Engine {
         // Add WASI@0.2 interfaces to the linker
         wasmtime_wasi::add_to_linker_async(&mut linker).context("failed to add WASI to linker")?;
 
+        // TODO: only if workload declares incoming-handler or outgoing-handler
         // Add HTTP interfaces to the linker
         #[cfg(feature = "http")]
         wasmtime_wasi_http::add_only_http_to_linker_async(&mut linker)
@@ -252,6 +254,7 @@ impl Engine {
         // Create the UnresolvedWorkloadHandle with volume mounts
         // TODO: Pass component configuration (pool_size, max_invocations) to WorkloadHandle
         Ok(UnresolvedWorkloadHandle::new(
+            id,
             self.clone(),
             wasmtime_component,
             linker,

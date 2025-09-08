@@ -11,6 +11,8 @@ pub struct WitWorld {
 pub struct WitInterface {
     pub namespace: String,
     pub package: String,
+    // TODO: it would be best for me to impl PartialEq here to
+    // ensure interfaces can be compared
     pub interfaces: Vec<String>,
     pub version: Option<semver::Version>,
     pub config: HashMap<String, String>,

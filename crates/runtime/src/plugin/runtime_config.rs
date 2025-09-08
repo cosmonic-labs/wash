@@ -1,9 +1,12 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use tokio::sync::RwLock;
 
 const RUNTIME_CONFIG_ID: &str = "runtime-config";
 
-use crate::{Plugin, UnresolvedWorkloadHandle, engine::Ctx};
+use crate::{Plugin, UnresolvedWorkloadHandle, WitInterface, engine::Ctx, wit::WitWorld};
 
 mod bindings {
     wasmtime::component::bindgen!({
@@ -51,9 +54,24 @@ impl Plugin for RuntimeConfig {
     fn id(&self) -> &'static str {
         RUNTIME_CONFIG_ID
     }
+
+    fn world(&self) -> WitWorld {
+        WitWorld {
+            imports: HashSet::from([WitInterface {
+                namespace: "wasi".to_string(),
+                package: "config".to_string(),
+                interfaces: vec!["runtime".to_string()],
+                version: Some(
+                    semver::Version::parse("0.2.0-draft").expect("to parse runtime config version"),
+                ),
+                config: HashMap::new(),
+            }]),
+            exports: HashSet::new(),
+        }
+    }
     async fn bind_workload(
         &self,
-        id: &String,
+        id: &str,
         workload_handle: &mut UnresolvedWorkloadHandle,
         interfaces: std::collections::HashSet<crate::wit::WitInterface>,
     ) -> anyhow::Result<()> {
@@ -78,7 +96,7 @@ impl Plugin for RuntimeConfig {
         self.config
             .write()
             .await
-            .insert(id.clone(), interface.config.clone());
+            .insert(id.to_string(), interface.config.clone());
 
         Ok(())
     }
