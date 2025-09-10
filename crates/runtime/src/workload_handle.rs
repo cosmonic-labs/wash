@@ -12,6 +12,10 @@ use crate::workload::VolumeMount;
 pub struct UnresolvedWorkloadHandle {
     /// The unique identifier for the workload component
     id: String,
+    /// The name of the workload
+    name: String,
+    /// The namespace of the workload
+    namespace: String,
     /// The [`Engine`] used to compile this component
     engine: Engine,
     /// The compiled [`Component`]
@@ -26,6 +30,8 @@ impl UnresolvedWorkloadHandle {
     /// Creates a new UnresolvedWorkloadHandle
     pub fn new(
         id: String,
+        name: String,
+        namespace: String,
         engine: Engine,
         component: Component,
         linker: Linker<Ctx>,
@@ -33,6 +39,8 @@ impl UnresolvedWorkloadHandle {
     ) -> Self {
         Self {
             id,
+            name,
+            namespace,
             engine,
             component,
             linker,
@@ -113,6 +121,21 @@ impl UnresolvedWorkloadHandle {
     //     let pre = self.linker.instantiate_pre(&self.component)?;
     //     pre.instantiate_async(self.new_store_with_ctx(ctx)).await
     // }
+
+    /// Get the id of this workload handle
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Get the name of the workload
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Get the namespace of the workload
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
 
     /// Gets the linker for this workload
     pub fn linker(&mut self) -> &mut Linker<Ctx> {

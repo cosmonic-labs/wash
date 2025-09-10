@@ -193,6 +193,8 @@ impl Engine {
         for (idx, component) in workload.components.iter().enumerate() {
             match self.initialize_workload(
                 uuid::Uuid::new_v4().to_string(),
+                workload.name.clone(),
+                workload.namespace.clone(),
                 component.clone(),
                 &validated_volumes,
             ) {
@@ -219,6 +221,8 @@ impl Engine {
     fn initialize_workload(
         &self,
         id: String,
+        name: String,
+        namespace: String,
         component: crate::workload::Component,
         validated_volumes: &std::collections::HashMap<String, PathBuf>,
     ) -> anyhow::Result<UnresolvedWorkloadHandle> {
@@ -255,6 +259,8 @@ impl Engine {
         // TODO: Pass component configuration (pool_size, max_invocations) to WorkloadHandle
         Ok(UnresolvedWorkloadHandle::new(
             id,
+            name,
+            namespace,
             self.clone(),
             wasmtime_component,
             linker,
