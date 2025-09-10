@@ -15,9 +15,12 @@ pub mod oci;
 pub use engine::{Engine, EngineBuilder};
 pub use host::{Host, HostApi, HostBuilder};
 pub use plugin::Plugin;
-pub use wit::WitInterface;
+pub use wit::{WitInterface, WitWorld};
 pub use workload::*;
 pub use workload_handle::{UnresolvedWorkloadHandle, WorkloadHandle};
+
+/// wasmtime re-export
+pub use wasmtime;
 
 // service wasi:cli/run
 // workload-a and workload-b both export foo:bar/interface
