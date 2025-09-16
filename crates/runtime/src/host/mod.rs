@@ -277,6 +277,8 @@ impl HostApi for Host {
         &self,
         request: WorkloadStartRequest,
     ) -> anyhow::Result<WorkloadStartResponse> {
+        let workload_id = self.generate_workload_id();
+
         let Workload {
             namespace: _,
             name: _,
@@ -287,8 +289,6 @@ impl HostApi for Host {
             volumes: _,
         } = &request.workload;
 
-        let workload_id = self.generate_workload_id();
-
         // Store the workload with initial state
         self.workloads.write().await.insert(
             workload_id.clone(),
@@ -296,8 +296,9 @@ impl HostApi for Host {
         );
 
         // Start the workload using the engine
-        let (_service, mut unresolved_handles) =
-            self.engine.start_workload(request.workload.clone())?;
+        let (_service, mut unresolved_handles) = self
+            .engine
+            .start_workload(&workload_id, request.workload.clone())?;
 
         // Phase 1: Bind plugins to all unresolved workload handles
         let mut component_workload_ids = Vec::new();

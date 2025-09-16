@@ -144,6 +144,7 @@ impl Engine {
 
     pub fn start_workload(
         &self,
+        workload_id: impl AsRef<str>,
         workload: crate::workload::Workload,
     ) -> anyhow::Result<(
         Option<crate::workload::Service>,
@@ -192,7 +193,7 @@ impl Engine {
         let mut workload_handles = Vec::new();
         for (idx, component) in workload.components.iter().enumerate() {
             match self.initialize_workload(
-                uuid::Uuid::new_v4().to_string(),
+                workload_id.as_ref().to_string(),
                 workload.name.clone(),
                 workload.namespace.clone(),
                 component.clone(),
